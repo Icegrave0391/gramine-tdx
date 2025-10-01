@@ -376,4 +376,7 @@ libos_syscall_t libos_syscall_table[LIBOS_SYSCALL_BOUND] = {
     [__NR_process_mrelease]        = (libos_syscall_t)0, // libos_syscall_process_mrelease
     [__NR_futex_waitv]             = (libos_syscall_t)0, // libos_syscall_futex_waitv
     [__NR_set_mempolicy_home_node] = (libos_syscall_t)0, // libos_syscall_set_mempolicy_home_node
+
+    /* Chuqi: Custom Gramine syscalls (C/R) */
+    [__NR_serverless_checkpoint]   = (libos_syscall_t)libos_syscall_serverless_checkpoint,
 };

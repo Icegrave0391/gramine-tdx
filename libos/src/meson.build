@@ -69,6 +69,7 @@ libos_sources = files(
     'libos_pollable_event.c',
     'libos_rtld.c',
     'libos_rwlock.c',
+    'libos_serverless.c',
     'libos_syscalls.c',
     'libos_utils.c',
     'net/ip.c',
@@ -108,6 +109,7 @@ libos_sources = files(
     'sys/libos_uname.c',
     'sys/libos_wait.c',
     'sys/libos_wrappers.c',
+    'sys/libos_serverless_checkpoint.c',
     'utils/log.c',
 )
 

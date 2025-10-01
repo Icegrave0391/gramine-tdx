@@ -154,6 +154,11 @@ int set_hostname(const char* name, size_t len);
 extern bool g_eventfd_passthrough_mode;
 int init_eventfd_mode(void);
 
+/* serverless checkpoint/restore functionality */
+int libos_init_serverless_checkpoint(void);
+void libos_serverless_python_ready_hook(void);
+void libos_serverless_function_complete_hook(void);
+
 void warn_unsupported_syscall(unsigned long sysno);
 void debug_print_syscall_before(unsigned long sysno, ...);
 void debug_print_syscall_after(unsigned long sysno, ...);

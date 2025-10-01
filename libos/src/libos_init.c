@@ -18,6 +18,7 @@
 #include "libos_ipc.h"
 #include "libos_lock.h"
 #include "libos_process.h"
+#include "libos_serverless.h"
 #include "libos_sync.h"
 #include "libos_tcb.h"
 #include "libos_thread.h"
@@ -503,6 +504,8 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
              strlen(g_pal_public_state->dns_host.hostname));
 
     RUN_INIT(init_eventfd_mode);
+
+    RUN_INIT(init_serverless_checkpoint);
 
     log_debug("LibOS initialized");
 

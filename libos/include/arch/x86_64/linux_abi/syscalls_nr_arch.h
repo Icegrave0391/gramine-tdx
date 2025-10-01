@@ -120,5 +120,8 @@
 #define __NR_set_mempolicy_home_node 450
 #endif
 #ifndef __NR_syscalls
-#define __NR_syscalls 451
+#define __NR_syscalls 1000  /* Extended to support custom syscalls like 999 */
 #endif
+
+/* Chuqi: Custom syscalls for Gramine extensions */
+#define __NR_serverless_checkpoint 999
