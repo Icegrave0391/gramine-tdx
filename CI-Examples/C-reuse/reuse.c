@@ -17,25 +17,17 @@
 /* Checkpoint points */
 #define CHECKPOINT_PROGRAM_INITIALIZED  1
 
-/* Helper functions for checkpoint/restore operations */
-long do_checkpoint_syscall(long op, long arg1, long arg2) {
-    return syscall(SERVERLESS_SYSCALL_NUM, op, arg1, arg2);
-}
-
 int create_checkpoint(int checkpoint_point) {
-    printf("Creating checkpoint at point %d...\n", checkpoint_point);
-    long ret = do_checkpoint_syscall(OP_CREATE_CHECKPOINT, checkpoint_point, 0);
+    long ret = syscall(SERVERLESS_SYSCALL_NUM, OP_CREATE_CHECKPOINT, checkpoint_point, 0);
     if (ret < 0) {
         printf("Failed to create checkpoint: %s\n", strerror(-ret));
         return -1;
     }
-    printf("Checkpoint created successfully (result: %ld)\n", ret);
     return 0;
 }
 
-int restore_checkpoint(void) {
-    printf("Restoring from checkpoint...\n");
-    long ret = do_checkpoint_syscall(OP_RESTORE_CHECKPOINT, 0, 0);
+int restore_checkpoint(int val) {
+    long ret = syscall(SERVERLESS_SYSCALL_NUM, OP_RESTORE_CHECKPOINT, 0, val);
     
     // Unreachable if successful
     /* If we reach here, restore failed because it should have jumped to checkpointed RIP */
@@ -46,7 +38,7 @@ int restore_checkpoint(void) {
 int main(void) {
     static int counter = 0;
     printf("=== Simple Checkpoint/Restore Test ===\n");
-
+    fflush(stdout);
     /* Checkpoint (C) */
     create_checkpoint(CHECKPOINT_PROGRAM_INITIALIZED);
     /*
@@ -56,9 +48,10 @@ int main(void) {
 
     counter++; // should always be 1
     printf("Counter value: %d\n", counter);
+    fflush(stdout);  /* Force the printf to appear immediately */
 
     /* Restore (R) */
-    restore_checkpoint();
+    restore_checkpoint(counter); // just pass the counter for debugging
 
     /* WARN: unreachable */
     printf("ERROR: Should not reach here after restore!\n");

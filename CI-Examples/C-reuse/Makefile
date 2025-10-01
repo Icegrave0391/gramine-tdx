@@ -4,7 +4,8 @@
 CFLAGS = -Wall -Wextra
 
 
-GRAMINE_LOG_LEVEL = debug
+# GRAMINE_LOG_LEVEL = debug
+GRAMINE_LOG_LEVEL = error
 CFLAGS += -g
 
 
@@ -19,3 +20,9 @@ reuse.manifest: reuse.manifest.template
 		$< $@
 	gramine-manifest-check $@
 
+.PHONY: clean
+clean:
+	$(RM) *.token *.sig *.manifest.sgx *.manifest helloworld.o helloworld OUTPUT
+
+.PHONY: distclean
+distclean: clean
