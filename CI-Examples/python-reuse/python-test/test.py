@@ -40,4 +40,23 @@ class GramineCheckpoint:
 
 if __name__ == "__main__":
     print("This is a module, not a standalone script.")
+    
+    # try to use syscall 
+    gcp = GramineCheckpoint()
+    if gcp.syscall_available:
+        print("Trying to invoke syscall `write` (to the console)")
+        # syscall number for write is 1
+        SYS_write = 1
+        fd = 1  # file descriptor for stdout
+        message = b"Hello from syscall write!\n"
+        buf = ctypes.create_string_buffer(message)
+        count = len(message)
+        ret = gcp.libsyscall.do_syscall3(SYS_write, fd, ctypes.addressof(buf), count)
+        if ret < 0:
+            print(f"Syscall write failed with return code: {ret}")
+        else:
+            print(f"Syscall write succeeded, wrote {ret} bytes")
+    else:
+        print("Syscall interface not available, skipping syscall test.")
+    
     sys.exit(0)
