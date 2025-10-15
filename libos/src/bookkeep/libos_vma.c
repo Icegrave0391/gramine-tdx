@@ -1291,6 +1291,20 @@ int dump_all_vmas(bool include_unmapped, struct libos_vma_info** out_infos, size
                               out_count);
 }
 
+static bool vma_filter_without_internal(struct libos_vma* vma, void* arg) {
+    assert(spinlock_is_locked(&vma_tree_lock));
+    __UNUSED(arg);
+    __UNUSED(vma);
+    return 1;
+}
+
+// Chuqi: support internal vma dump for ring-0 checkpoint
+int dump_all_vmas_with_internal(struct libos_vma_info** out_infos, size_t* out_count) {
+    return dump_vmas(out_infos, out_count, /*begin=*/0, /*end=*/UINTPTR_MAX,
+                     vma_filter_without_internal,
+                     /*arg=*/NULL);
+}
+
 void free_vma_info_array(struct libos_vma_info* vma_infos, size_t count) {
     for (size_t i = 0; i < count; i++) {
         if (vma_infos[i].file) {

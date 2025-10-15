@@ -114,6 +114,12 @@ bool is_in_adjacent_user_vmas(const void* addr, size_t length, int prot);
  * The returned array can be subsequently freed by `free_vma_info_array`.
  */
 int dump_all_vmas(bool include_unmapped, struct libos_vma_info** out_infos, size_t* out_count);
+
+/* Chuqi:
+ * Support dumping of all VMAs, including internal ones.
+ */
+int dump_all_vmas_with_internal(struct libos_vma_info** out_infos, size_t* out_count);
+
 /*
  * Same as `dump_all_vmas`, but dumps only in `[begin; end)` range.
  */
