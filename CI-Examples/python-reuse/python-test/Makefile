@@ -3,11 +3,9 @@
 
 ARCH_LIBDIR ?= /lib/$(shell $(CC) -dumpmachine)
 
-ifeq ($(DEBUG),1)
-GRAMINE_LOG_LEVEL = debug
-else
+#GRAMINE_LOG_LEVEL = debug
 GRAMINE_LOG_LEVEL = error
-endif
+
 
 .PHONY: all
 all: python.manifest libsyscall.so
