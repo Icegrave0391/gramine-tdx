@@ -277,3 +277,33 @@ void sched_thread_set_cpu_affinity(struct thread* thread, unsigned long* cpu_mas
     }
     spinlock_unlock_enable_irq(&g_thread_list_lock);
 }
+
+// Todo(chuqi): serverless debug functions
+size_t sched_get_thread_count(void) {
+    size_t count = 0;
+    spinlock_lock_disable_irq(&g_thread_list_lock);
+    
+    struct thread* thread;
+    LISTP_FOR_EACH_ENTRY(thread, &g_thread_list, list) {
+        count++;
+    }
+    
+    spinlock_unlock_enable_irq(&g_thread_list_lock);
+    return count;
+}
+
+void sched_walk_thread_list_for_debug(void (*callback)(struct thread*, size_t)) {
+    if (!callback)
+        return;
+        
+    spinlock_lock_disable_irq(&g_thread_list_lock);
+    
+    size_t index = 0;
+    struct thread* thread;
+    LISTP_FOR_EACH_ENTRY(thread, &g_thread_list, list) {
+        callback(thread, index);
+        index++;
+    }
+    
+    spinlock_unlock_enable_irq(&g_thread_list_lock);
+}

@@ -32,6 +32,9 @@ pal_vm_common_sources = files(
     'pal_common_tf.c',
     'pal_common_threading.c',
 
+    # Chuqi: add serverless source file
+    'pal_serverless.c',
+
     'external/realpath.c',
 )
 

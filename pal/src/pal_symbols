@@ -52,3 +52,9 @@ PalAttestationQuote
 PalGetSpecialKey
 PalDebugLog
 PalGetPalPublicState
+PalServerlessGetVcpuCount
+PalServerlessGetCpuTopology
+PalServerlessGetMemTotal
+PalServerlessGetHostType
+PalServerlessIsCpuOnline
+PalServerlessGetPalThreadCount

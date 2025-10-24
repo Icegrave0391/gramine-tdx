@@ -1010,4 +1010,57 @@ void PalDebugMapRemove(void* start_addr);
  * DEBUG, falls back to raw value ("0x1234"). */
 void PalDebugDescribeLocation(uintptr_t addr, char* buf, size_t buf_size);
 
+/*!
+ * \brief Serverless checkpoint/restore API functions
+ *
+ * These functions provide system information needed for serverless checkpoint/restore operations.
+ */
+
+/*!
+ * \brief Get the number of virtual CPUs available to the guest.
+ *
+ * \return Number of vCPUs.
+ */
+uint32_t PalServerlessGetVcpuCount(void);
+
+/*!
+ * \brief Get CPU topology information.
+ *
+ * \param[out] threads_cnt  Number of hardware threads.
+ * \param[out] cores_cnt    Number of CPU cores.
+ * \param[out] sockets_cnt  Number of CPU sockets.
+ *
+ * \return 0 on success, negative error code on failure.
+ */
+int PalServerlessGetCpuTopology(size_t* threads_cnt, size_t* cores_cnt, size_t* sockets_cnt);
+
+/*!
+ * \brief Get total system memory size.
+ *
+ * \return Total memory in bytes, or 0 if unavailable.
+ */
+size_t PalServerlessGetMemTotal(void);
+
+/*!
+ * \brief Get host platform type.
+ *
+ * \return String describing the host type (e.g., "VM", "SGX", "direct"), or NULL if unavailable.
+ */
+const char* PalServerlessGetHostType(void);
+
+/*!
+ * \brief Check if a specific CPU thread is online.
+ *
+ * \param thread_id  The hardware thread ID to check.
+ *
+ * \return true if the CPU thread is online, false otherwise.
+ */
+bool PalServerlessIsCpuOnline(size_t thread_id);
+
+/*!
+ * \brief Get the number of PAL internal threads.
+ *
+ * \return Number of threads managed by PAL's internal scheduler.
+ */
+size_t PalServerlessGetPalThreadCount(void);
 #undef INSIDE_PAL_H

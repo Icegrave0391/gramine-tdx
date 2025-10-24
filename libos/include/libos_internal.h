@@ -154,11 +154,6 @@ int set_hostname(const char* name, size_t len);
 extern bool g_eventfd_passthrough_mode;
 int init_eventfd_mode(void);
 
-/* serverless checkpoint/restore functionality */
-int libos_init_serverless_checkpoint(void);
-void libos_serverless_python_ready_hook(void);
-void libos_serverless_function_complete_hook(void);
-
 void warn_unsupported_syscall(unsigned long sysno);
 void debug_print_syscall_before(unsigned long sysno, ...);
 void debug_print_syscall_after(unsigned long sysno, ...);
@@ -174,6 +169,9 @@ void debug_print_syscall_after(unsigned long sysno, ...);
 #define ALLOC_ALIGN_UP(x)       ALIGN_UP_POW2(x, ALLOC_ALIGNMENT)
 #define ALLOC_ALIGN_DOWN_PTR(x) ALIGN_DOWN_PTR_POW2(x, ALLOC_ALIGNMENT)
 #define ALLOC_ALIGN_UP_PTR(x)   ALIGN_UP_PTR_POW2(x, ALLOC_ALIGNMENT)
+
+/* Chuqi: C/R */
+int libos_init_serverless_checkpoint(void);
 
 void* __system_malloc(size_t size);
 void __system_free(void* addr, size_t size);

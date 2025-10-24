@@ -31,8 +31,6 @@ int serverless_restore_checkpoint(void);
 bool serverless_has_checkpoint(void);
 int serverless_clear_checkpoint(void);
 long libos_syscall_serverless_checkpoint(long operation, long arg1, long arg2);
-void serverless_on_python_ready(void);
-void serverless_on_function_complete(void);
 
 /* Utility functions */
 static inline uint64_t get_timestamp(void) {

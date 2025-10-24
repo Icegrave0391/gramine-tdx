@@ -29,8 +29,6 @@
 extern int serverless_create_checkpoint(int checkpoint_point);
 extern int serverless_restore_checkpoint(void);
 extern int init_serverless_checkpoint(void);
-extern void serverless_on_python_ready(void);
-extern void serverless_on_function_complete(void);
 
 /*
  * Custom syscall handler for serverless checkpoint operations.
@@ -113,22 +111,4 @@ int libos_init_serverless_checkpoint(void) {
     
     log_always("Serverless checkpoint system initialized");
     return 0;
-}
-
-/*
- * Hook for Python runtime initialization complete.
- * This can be called when Python modules are loaded and the runtime is ready.
- */
-void libos_serverless_python_ready_hook(void) {
-    log_debug("Python runtime ready - triggering checkpoint creation");
-    serverless_on_python_ready();
-}
-
-/*
- * Hook for serverless function execution complete.
- * This can be called after each function execution to trigger restore.
- */
-void libos_serverless_function_complete_hook(void) {
-    log_debug("Function execution complete - checking for auto-restore");
-    serverless_on_function_complete();
 }

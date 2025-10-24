@@ -47,3 +47,5 @@ void sched_thread_add(struct thread* thread);
 void sched_thread_remove(struct thread* thread);
 void sched_thread_set_cpu_affinity(struct thread* thread, unsigned long* cpu_mask,
                                    size_t cpu_mask_len);
+size_t sched_get_thread_count(void);
+void sched_walk_thread_list_for_debug(void (*callback)(struct thread*, size_t));
