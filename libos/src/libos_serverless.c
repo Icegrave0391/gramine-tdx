@@ -926,32 +926,6 @@ __attribute__((unused)) static void print_ipc_state(void) {
     /* TODO: Add more detailed IPC state printing when available */
 }
 
-/* Main system state printing function */
-__attribute__((unused)) static void print_system_state(const char* phase) {
-#ifdef DEBUG_PRINT
-    log_always("==========================================");
-    log_always("=== %s: Complete LibOS Kernel State ===", phase);
-    log_always("==========================================");
-
-    /* states from PAL */
-    print_system_info_from_pal();
-    
-    /* Print all subsystem states */
-    print_all_threads_state();
-    print_memory_management_state(); 
-    print_process_state();
-    print_filesystem_state();
-    print_signal_state();
-    print_ipc_state();
-    
-    log_always("==========================================");
-    log_always("=== End %s: LibOS Kernel State ===", phase);
-    log_always("==========================================");
-#else
-    __UNUSED(phase);
-#endif
-}
-
 /* Print system information obtained from PAL */
 __attribute__((unused)) static void print_system_info_from_pal(void) {
     log_always("=== System Information from PAL ===");
@@ -1006,6 +980,32 @@ __attribute__((unused)) static void print_system_info_from_pal(void) {
     log_always("PAL Internal Thread Count: %zu", pal_thread_count);
     
     log_always("=== End System Information from PAL ===");
+}
+
+/* Main system state printing function */
+__attribute__((unused)) static void print_system_state(const char* phase) {
+#ifdef DEBUG_PRINT
+    log_always("==========================================");
+    log_always("=== %s: Complete LibOS Kernel State ===", phase);
+    log_always("==========================================");
+
+    /* states from PAL */
+    print_system_info_from_pal();
+    
+    /* Print all subsystem states */
+    print_all_threads_state();
+    print_memory_management_state(); 
+    print_process_state();
+    print_filesystem_state();
+    print_signal_state();
+    print_ipc_state();
+    
+    log_always("==========================================");
+    log_always("=== End %s: LibOS Kernel State ===", phase);
+    log_always("==========================================");
+#else
+    __UNUSED(phase);
+#endif
 }
 
 static int capture_cpu_state_from_syscall_context(struct libos_context* context) {
@@ -1082,6 +1082,8 @@ int serverless_create_checkpoint_from_syscall(int checkpoint_point, PAL_CONTEXT*
      * This ensures no other threads (IPC, idle, bottomhalves) can interfere with our memory capture
      */
     cli(); /* Disable interrupts to prevent preemption */
+    /* Acquire checkpoint barrier on all CPUs to synchronize multi-core checkpoint operation */
+    PalServerlessCheckpointBarrierAcquire();
     
     /* Print complete LibOS kernel state before checkpoint */
     print_system_state("PRE-CHECKPOINT");
@@ -1098,6 +1100,7 @@ int serverless_create_checkpoint_from_syscall(int checkpoint_point, PAL_CONTEXT*
     if (ret < 0) {
         log_error("Failed to capture ring-3 CPU state: %s", unix_strerror(ret));
         sti(); /* Re-enable interrupts before returning */
+        PalServerlessCheckpointBarrierRelease(); /* Release barrier on failure */
         return ret;
     }
     
@@ -1106,14 +1109,16 @@ int serverless_create_checkpoint_from_syscall(int checkpoint_point, PAL_CONTEXT*
     if (ret < 0) {
         log_error("Failed to capture memory contents: %s", unix_strerror(ret));
         sti(); /* Re-enable interrupts before returning */
+        PalServerlessCheckpointBarrierRelease(); /* Release barrier on failure */
         return ret;
     }
     
     /* Mark checkpoint as created */
     g_serverless_checkpoint->metadata.checkpoint_created = true;
     
-    /* Re-enable interrupts after checkpoint completion */
-    sti();
+    /* Release checkpoint barrier on all CPUs to allow normal operation */
+    PalServerlessCheckpointBarrierRelease();
+    sti(); /* Re-enable interrupts after checkpoint completion */
     
     log_debug("Ring-3 program checkpoint created successfully (%zu memory regions)", 
               g_serverless_checkpoint->user_state.memory_mgmt.num_regions);
@@ -1165,6 +1170,7 @@ int serverless_restore_checkpoint(void) {
      * This ensures atomic restoration of both ring-0 kernel state and ring-3 program state
      */
     cli(); /* Disable interrupts to prevent preemption */
+    PalServerlessCheckpointBarrierAcquire();
     
     /* Print complete LibOS kernel state before restore */
     print_system_state("PRE-RESTORE");
@@ -1176,6 +1182,7 @@ int serverless_restore_checkpoint(void) {
     int ret = restore_all_memory_contents();
     if (ret < 0) {
         log_error("Failed to restore memory contents: %s", unix_strerror(ret));
+        PalServerlessCheckpointBarrierRelease(); /* Release barrier on failure */
         sti(); /* Re-enable interrupts before returning */
         return ret;
     }
@@ -1185,6 +1192,7 @@ int serverless_restore_checkpoint(void) {
     PAL_CONTEXT* ring3_context = LIBOS_TCB_GET(context.regs);
     if (!ring3_context) {
         log_error("Cannot access ring-3 CPU context for restore");
+        PalServerlessCheckpointBarrierRelease(); /* Release barrier on failure */
         sti(); /* Re-enable interrupts before returning */
         return -EFAULT;
     }
@@ -1215,7 +1223,8 @@ int serverless_restore_checkpoint(void) {
     /* Restore segment registers */
     ring3_context->csgsfsss = g_serverless_checkpoint->user_state.cpu_context.cs;
     
-    /* Re-enable interrupts after restore completion */
+    /* Release checkpoint barrier on all CPUs to allow normal operation */
+    PalServerlessCheckpointBarrierRelease();
     sti();
     
     log_debug("Ring-3 program checkpoint restored - syscall will return to checkpointed state");
@@ -1272,8 +1281,6 @@ int serverless_clear_checkpoint(void) {
     
     /* Reset the static allocator */
     CR_malloc_reset();
-    
-    log_debug("Ring-3 program and ring-0 kernel checkpoints cleared, static allocator reset");
     return 0;
 }
 
@@ -1297,37 +1304,5 @@ int init_serverless_checkpoint(void) {
     /* Calculate page-aligned checkpoint section start for debugging */
     uintptr_t checkpoint_section_start = (uintptr_t)&g_serverless_checkpoint_section & ~0xFFF; /* Page-aligned start */
     assert(checkpoint_section_start == (uintptr_t)g_checkpoint_base);
-
-    log_always("DEBUG: init_serverless_checkpoint: g_serverless_checkpoint at %p (size=%zu)", 
-               g_serverless_checkpoint, sizeof(struct serverless_checkpoint_state));
-    log_always("DEBUG: Checkpoint section range: [%p-%p] (%zu bytes)", 
-               (void*)g_checkpoint_base, (void*)g_checkpoint_end, 
-               (size_t)(g_checkpoint_end - g_checkpoint_base));
-    log_always("DEBUG: Checkpoint section starts at %p, size=%zu", 
-               &g_serverless_checkpoint_section, sizeof(struct serverless_checkpoint_section));
-    
-    /* Check if the static address is in any VMA region */
-    struct libos_vma_info* vmas;
-    size_t vma_count;
-    int ret = dump_all_vmas_with_internal(&vmas, &vma_count);
-    if (ret == 0) {
-        bool found = false;
-        for (size_t i = 0; i < vma_count; i++) {
-            struct libos_vma_info* vma = &vmas[i];
-            if (checkpoint_section_start >= (uintptr_t)vma->addr && 
-                checkpoint_section_start < (uintptr_t)vma->addr + vma->length) {
-                log_always("DEBUG: g_serverless_checkpoint (page-aligned) is in VMA [%p-%p] comment='%s'", 
-                          vma->addr, (char*)vma->addr + vma->length, vma->comment);
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            log_always("DEBUG: g_serverless_checkpoint (page-aligned) is NOT in any VMA region - this is good!");
-        }
-        free_vma_info_array(vmas, vma_count);
-    }
-
-    log_debug("Serverless checkpoint system initialized with page-aligned static memory. g_serverless_checkpoint=%p (enabled=%d)", g_serverless_checkpoint, g_serverless_checkpoint->metadata.enabled);
     return 0;
 }

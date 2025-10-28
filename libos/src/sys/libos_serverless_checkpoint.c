@@ -44,30 +44,23 @@ extern int init_serverless_checkpoint(void);
  *   For CHECK_STATUS: 1 if checkpoint available, 0 if not available
  */
 long libos_syscall_serverless_checkpoint(long operation, long arg1, long arg2) {
-    __UNUSED(arg2); /* Reserved for future use */
-
-    log_debug("Serverless checkpoint syscall: op=%ld, arg1=%ld, arg2=%ld", 
-              operation, arg1, arg2);
-
+    /* Reserved for future use */
+    __UNUSED(arg1);
+    __UNUSED(arg2); 
+    
     switch (operation) {
         case OP_CREATE_CHECKPOINT: {
             int checkpoint_point = 0;
-
-            log_always("Creating serverless checkpoint at point %d", checkpoint_point);
             
             int ret = serverless_create_checkpoint(checkpoint_point);
             if (ret < 0) {
                 log_error("Failed to create checkpoint: %s", unix_strerror(ret));
                 return ret;
             }
-            
-            log_always("Serverless checkpoint created successfully");
             return 0;
         }
         
         case OP_RESTORE_CHECKPOINT: {
-            log_debug("Restoring from serverless checkpoint");
-            
             int ret = serverless_restore_checkpoint();
             if (ret < 0) {
                 log_error("Failed to restore checkpoint: %s", unix_strerror(ret));
@@ -101,14 +94,10 @@ long libos_syscall_serverless_checkpoint(long operation, long arg1, long arg2) {
  * This should be called from libos_init.c
  */
 int libos_init_serverless_checkpoint(void) {
-    log_debug("Initializing serverless checkpoint system");
-    
     int ret = init_serverless_checkpoint();
     if (ret < 0) {
         log_error("Failed to initialize serverless checkpoint system: %s", unix_strerror(ret));
         return ret;
     }
-    
-    log_always("Serverless checkpoint system initialized");
     return 0;
 }
