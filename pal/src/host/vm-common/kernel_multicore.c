@@ -263,6 +263,9 @@ int init_multicore(uint32_t num_cpus, void* hob_list_addr) {
     }
 
 success:
+    /* Initialize checkpoint barrier system now that all CPUs are ready */
+    checkpoint_barrier_init();
+    
     /* only after all CPUs initialized themselves (including interrupts init), can claim that
      * interrupts are fully enabled in the system */
     g_interrupts_enabled = true;
@@ -301,4 +304,110 @@ noreturn void pal_start_ap_c(uint32_t cpu_idx) {
 
     sched_thread(&g_lock_single_ap_cpu, /*clear_child_tid=*/NULL);
     __builtin_unreachable();
+}
+
+/*
+ * Checkpoint/Restore synchronization implementation using per-CPU spinlocks
+ * 
+ * Design:
+ * - Each CPU has a per-CPU spinlock in its per_cpu_data structure
+ * - When LibOS requests checkpoint, it calls checkpoint_barrier_acquire_all()
+ *   which acquires ALL per-CPU locks
+ * - Idle threads must acquire their local lock before any system operations
+ * - This provides atomic protection with no race conditions
+ */
+
+/*
+ * Initialize checkpoint barrier system during multicore initialization
+ */
+void checkpoint_barrier_init(void) {
+    if (!g_per_cpu_data || !g_num_cpus) {
+        log_error("checkpoint_barrier_init: per-CPU data not initialized");
+        return;
+    }
+    
+    /* Initialize all per-CPU spinlocks */
+    for (uint32_t cpu_id = 0; cpu_id < g_num_cpus; cpu_id++) {
+        spinlock_init(&g_per_cpu_data[cpu_id].checkpoint_barrier_lock);
+    }
+}
+
+/*
+ * Acquire checkpoint barrier on all CPUs
+ * This is called by LibOS when starting checkpoint/restore operation
+ * WARNING: This will BLOCK until all idle threads release their locks
+ */
+void checkpoint_barrier_acquire_all(void) {
+    int current_cpuid = get_per_cpu_data()->cpu_id;
+
+    if (!g_per_cpu_data || !g_num_cpus) {
+        log_error("checkpoint_barrier_acquire_all: per-CPU data not initialized");
+        return;
+    }
+    
+    /* Acquire locks */
+    for (uint32_t cpu_id = 0; cpu_id < g_num_cpus; cpu_id++) {
+        if (cpu_id == current_cpuid) {
+            /* 
+             * Skip the current CPU, as this cpu works at the C/R context 
+             * so it will not trigger the idle_thread.
+             */
+            continue;
+        }
+        spinlock_lock(&g_per_cpu_data[cpu_id].checkpoint_barrier_lock);
+        log_debug("Acquired checkpoint lock on CPU %u", cpu_id);
+    }
+}
+
+/*
+ * Release checkpoint barrier on all CPUs
+ * This is called by LibOS when checkpoint/restore operation is complete
+ */
+void checkpoint_barrier_release_all(void) {
+    if (!g_per_cpu_data || !g_num_cpus) {
+        log_error("checkpoint_barrier_release_all: per-CPU data not initialized");
+        return;
+    }
+    
+    /* Release locks on all CPUs in reverse order */
+    for (int cpu_id = g_num_cpus - 1; cpu_id >= 0; cpu_id--) {
+        spinlock_unlock(&g_per_cpu_data[cpu_id].checkpoint_barrier_lock);
+        log_debug("Released checkpoint lock on CPU %u", cpu_id);
+    }
+}
+
+/*
+ * Acquire local checkpoint barrier for current CPU
+ * This is called by idle threads before performing system operations
+ * Will block if checkpoint is in progress
+ */
+void _barrier_acquire_local(void) {
+    struct per_cpu_data* local_cpu = get_per_cpu_data();
+    if (!local_cpu) {
+        log_warning("checkpoint_barrier_acquire_local: no per-CPU data, skipping");
+        return;
+    }
+    
+    uint32_t cpu_id = local_cpu->cpu_id;
+    
+    /* This will block if LibOS has acquired the lock for checkpoint */
+    spinlock_lock(&local_cpu->checkpoint_barrier_lock);
+    log_debug("CPU %u acquired local checkpoint barrier", cpu_id);
+}
+
+/*
+ * Release local checkpoint barrier for current CPU  
+ * This is called by idle threads after completing system operations
+ */
+void _barrier_release_local(void) {
+    struct per_cpu_data* local_cpu = get_per_cpu_data();
+    if (!local_cpu) {
+        log_warning("checkpoint_barrier_release_local: no per-CPU data, skipping");
+        return;
+    }
+    
+    uint32_t cpu_id = local_cpu->cpu_id;
+    
+    spinlock_unlock(&local_cpu->checkpoint_barrier_lock);
+    log_debug("CPU %u released local checkpoint barrier", cpu_id);
 }

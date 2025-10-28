@@ -52,3 +52,13 @@ size_t PalServerlessGetPalThreadCount(void) {
     /* Return a dummy thread count for skeleton PAL */
     return 1;
 }
+
+/* Dummy implementation for skeleton PAL */
+void PalServerlessCheckpointBarrierAcquire(void) {
+    /* No-op for skeleton PAL - no multi-core synchronization needed */
+}
+
+/* Dummy implementation for skeleton PAL */
+void PalServerlessCheckpointBarrierRelease(void) {
+    /* No-op for skeleton PAL - no multi-core synchronization needed */
+}

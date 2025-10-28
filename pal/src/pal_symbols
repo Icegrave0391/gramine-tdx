@@ -58,3 +58,5 @@ PalServerlessGetMemTotal
 PalServerlessGetHostType
 PalServerlessIsCpuOnline
 PalServerlessGetPalThreadCount
+PalServerlessCheckpointBarrierAcquire
+PalServerlessCheckpointBarrierRelease

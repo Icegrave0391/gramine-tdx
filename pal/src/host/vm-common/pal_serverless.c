@@ -246,3 +246,24 @@ size_t PalServerlessGetPalThreadCount(void) {
     
     return count;
 }
+
+/*
+ * Acquire checkpoint barrier on all CPUs for checkpoint/restore operations.
+ * 
+ * This function sets per-CPU barrier flags that cause idle and background threads
+ * to pause their operations. This ensures system state consistency during
+ * checkpoint/restore operations.
+ */
+void PalServerlessCheckpointBarrierAcquire(void) {
+    checkpoint_barrier_acquire_all();
+}
+
+/*
+ * Release checkpoint barrier on all CPUs.
+ * 
+ * This function clears per-CPU barrier flags, allowing idle and background threads
+ * to resume their normal operations after checkpoint/restore is complete.
+ */
+void PalServerlessCheckpointBarrierRelease(void) {
+    checkpoint_barrier_release_all();
+}

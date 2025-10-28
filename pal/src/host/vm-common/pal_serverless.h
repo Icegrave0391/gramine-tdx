@@ -64,3 +64,22 @@ const char* PalServerlessGetHostType(void);
  *   true if the thread is online, false otherwise
  */
 bool PalServerlessIsCpuOnline(size_t thread_id);
+
+/*
+ * Acquire checkpoint barrier on all CPUs for checkpoint/restore operations.
+ * 
+ * This function sets per-CPU barrier flags that cause idle and background threads
+ * to pause their operations. This ensures system state consistency during
+ * checkpoint/restore operations.
+ * 
+ * Must be paired with PalServerlessCheckpointBarrierRelease().
+ */
+void PalServerlessCheckpointBarrierAcquire(void);
+
+/*
+ * Release checkpoint barrier on all CPUs.
+ * 
+ * This function clears per-CPU barrier flags, allowing idle and background threads
+ * to resume their normal operations after checkpoint/restore is complete.
+ */
+void PalServerlessCheckpointBarrierRelease(void);

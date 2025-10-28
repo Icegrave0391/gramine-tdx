@@ -9,6 +9,7 @@
 
 #include "kernel_sched.h"
 #include "kernel_thread.h"
+#include "spinlock.h"
 
 #define SCHEDULING_STACK_SIZE    128     /* temp stack used by save_context_and_restore_next() */
 
@@ -45,7 +46,13 @@ struct per_cpu_data {
     struct thread* bottomhalves_thread; /* only CPU0 has a bottomhalves thread currently */
 
     uint8_t invalidate_tlb_ipi_received; /* to protect against extra "invalidate TLB" interrupts */
+#if 0
     uint8_t reserved[15];
+#else 
+    /* Chuqi: Checkpoint/Restore synchronization - per-CPU spinlock */
+    spinlock_t checkpoint_barrier_lock;
+    uint8_t reserved[11];
+#endif
 } __attribute__((packed));
 static_assert(sizeof(struct per_cpu_data) == 64, "incorrect struct size");
 
@@ -64,3 +71,10 @@ noreturn void pal_start_ap_c(uint32_t cpu_idx);
 
 int init_multicore_prepare(uint32_t num_cpus);
 int init_multicore(uint32_t num_cpus, void* hob_list_addr);
+
+/* Checkpoint/Restore synchronization API */
+void checkpoint_barrier_init(void);
+void checkpoint_barrier_acquire_all(void);
+void checkpoint_barrier_release_all(void);
+void _barrier_acquire_local(void);
+void _barrier_release_local(void);

@@ -20,6 +20,7 @@
 #include "asan.h"
 #include "spinlock.h"
 
+#include "kernel_multicore.h"
 #include "kernel_sched.h"
 #include "kernel_thread.h"
 #include "kernel_time.h"
@@ -193,8 +194,22 @@ noreturn int thread_idle_run(void* args) {
     __UNUSED(args);
 
     while (true) {
+        /* 
+         * Acquire checkpoint barrier lock for this entire idle cycle.
+         * This will block if LibOS is performing checkpoint/restore.
+         * No race conditions possible - either we get the lock and proceed,
+         * or we wait until checkpoint is complete.
+         */
+        _barrier_acquire_local();
+
+        /* Now we have exclusive access - safe to perform all operations */
         delay(IDLE_THREAD_PERIOD_US, &g_kick_sched_thread);
         __atomic_store_n(&g_kick_sched_thread, false, __ATOMIC_RELEASE);
+        
+        /* Release the lock before calling scheduler, as scheduler may take time
+         * and we want to allow checkpoint to proceed if needed */
+        _barrier_release_local();
+        
         sched_thread(/*lock_to_unlock=*/NULL, /*clear_child_tid=*/NULL);
     }
 
