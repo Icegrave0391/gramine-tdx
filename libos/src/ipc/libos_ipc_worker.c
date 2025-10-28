@@ -380,7 +380,7 @@ static int init_self_ipc_handle(void) {
                        /*use_vmid_for_name=*/true);
 }
 
-static int create_ipc_worker(void) {
+__attribute__((unused)) static int create_ipc_worker(void) {
     int ret = init_self_ipc_handle();
     if (ret < 0) {
         return ret;
@@ -405,7 +405,12 @@ static int create_ipc_worker(void) {
 }
 
 int init_ipc_worker(void) {
+// Chuqi: disable IPC worker for VM-based unikernel
+#if 0
     return create_ipc_worker();
+#else
+    return 0;
+#endif
 }
 
 void terminate_ipc_worker(void) {

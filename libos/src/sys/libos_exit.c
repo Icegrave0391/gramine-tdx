@@ -52,9 +52,9 @@ static noreturn void libos_clean_and_exit(int exit_code) {
      * do not expect that, init process is pretty special).
      */
     release_id(get_cur_thread()->tid);
-
+#if 0  // Chuqi: disable IPC worker for VM-based unikernel
     terminate_ipc_worker();
-
+#endif
     log_debug("process %u exited with status %d", g_process_ipc_ids.self_vmid, exit_code);
 
     /* TODO: We exit whole libos, but there are some objects that might need cleanup - we should do
