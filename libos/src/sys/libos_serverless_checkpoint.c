@@ -20,11 +20,6 @@
 #define OP_RESTORE_CHECKPOINT 2
 #define OP_CHECK_STATUS       3
 
-/* Checkpoint points */
-// #define CHECKPOINT_PYTHON_INITIALIZED  1
-// #define CHECKPOINT_MODULES_LOADED      2
-// #define CHECKPOINT_READY_FOR_EXECUTION 3
-
 /* External functions from libos_serverless.c */
 extern int serverless_create_checkpoint(int checkpoint_point);
 extern int serverless_restore_checkpoint(void);

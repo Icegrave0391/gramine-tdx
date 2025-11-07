@@ -524,7 +524,6 @@ static int capture_all_memory_contents(void) {
 static int restore_all_memory_contents(void) {
     /* First restore ring-3 program memory */
     if (g_serverless_checkpoint->user_state.memory_mgmt.regions) {
-        log_debug("Restoring ring-3 program memory...");
         for (size_t i = 0; i < g_serverless_checkpoint->user_state.memory_mgmt.num_regions; i++) {
             struct memory_region_snapshot* region = &g_serverless_checkpoint->user_state.memory_mgmt.regions[i];
             
@@ -545,7 +544,6 @@ static int restore_all_memory_contents(void) {
 #if 1
     /* Then restore ring-0 kernel memory */
     if (g_serverless_checkpoint->kernel_state.memory_mgmt.regions) {
-        log_debug("Restoring ring-0 kernel memory...");
         size_t region_count = g_serverless_checkpoint->kernel_state.memory_mgmt.num_regions;
         size_t total_restored_memory = 0;
         
