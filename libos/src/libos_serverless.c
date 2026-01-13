@@ -31,6 +31,16 @@
 
 // #define DEBUG_PRINT
 
+/*
+ * Custom section attributes for page-aligned checkpoint code and data.
+ * These sections will be placed in separate page-aligned regions by the linker.
+ * 
+ * - .serverless.data: All static/global data for checkpoint (page-aligned)
+ * - .serverless.text: All checkpoint-related functions (page-aligned)
+ */
+#define SERVERLESS_DATA   __attribute__((section(".serverless.data")))
+#define SERVERLESS_CODE   __attribute__((section(".serverless.text")))
+
 /* Forward declarations for checkpoint structures */
 struct memory_region_snapshot;
 
@@ -130,23 +140,24 @@ _Static_assert(sizeof(struct serverless_checkpoint_section) == (SERVERLESS_CR_SI
                "serverless_checkpoint_section must be exactly aligned to the size");
 
 /* Static global checkpoint section - guaranteed to be page-aligned and occupy one full page */
-static struct serverless_checkpoint_section g_serverless_checkpoint_section = {0};
+SERVERLESS_DATA static struct serverless_checkpoint_section g_serverless_checkpoint_section = {0};
 
 /* Global serverless checkpoint state pointer - allocated in CR-aware memory */
 /* IMPORTANT: This pointer itself is in normal memory, but points to CR-aware memory
  * to avoid self-modification issues during restore */
-static struct serverless_checkpoint_state* g_serverless_checkpoint = &g_serverless_checkpoint_section.checkpoint_metadata;
-static uint64_t g_checkpoint_base;
-static uint64_t g_checkpoint_end;
+SERVERLESS_DATA static struct serverless_checkpoint_state* g_serverless_checkpoint = &g_serverless_checkpoint_section.checkpoint_metadata;
+SERVERLESS_DATA static uint64_t g_checkpoint_base = 0;
+SERVERLESS_DATA static uint64_t g_checkpoint_end = 0;
 
 
 /* Global variable to control which system_malloc to use */
-bool g_use_cr_malloc = false;
+SERVERLESS_DATA bool g_use_cr_malloc = false;
 
 /* Static allocator state - tracks current allocation offset within data region */
-static size_t g_static_alloc_offset = 0;
+SERVERLESS_DATA static size_t g_static_alloc_offset = 0;
 
 /* Simple static allocator that allocates from g_serverless_checkpoint_section.data region */
+SERVERLESS_CODE
 static void* CR_malloc(size_t size) {
     /* Align size to 8-byte boundary for better alignment */
     size_t aligned_size = (size + 7) & ~7;
@@ -167,12 +178,14 @@ static void* CR_malloc(size_t size) {
 }
 
 /* Reset the static allocator to initial state */
+SERVERLESS_CODE
 static void CR_malloc_reset(void) {
     g_static_alloc_offset = 0;
     log_debug("CR_malloc_reset: Static allocator reset, available space: %zu bytes", (size_t)SERVERLESS_CR_SIZE);
 }
 
 /* Get current allocator statistics */
+SERVERLESS_CODE
 static void CR_malloc_stats(void) {
     log_always("CR_malloc Stats:");
     log_always("  Data region base: %p", g_serverless_checkpoint_section.data);
@@ -187,6 +200,7 @@ static void CR_malloc_stats(void) {
 }
 
 /* Print detailed PAL handle information */
+SERVERLESS_CODE
 static void print_pal_handle_info(const char* prefix, PAL_HANDLE handle) {
     if (!handle) {
         log_always("%s: handle=NULL", prefix);
@@ -200,6 +214,7 @@ static void print_pal_handle_info(const char* prefix, PAL_HANDLE handle) {
  * Calculate overlap between a VMA region and checkpoint section
  * Returns true if there's overlap and fills overlap information
  */
+SERVERLESS_CODE
 static bool calculate_overlap_with_checkpoint(void* vma_start, size_t vma_size,
                                             void** overlap_start, size_t* overlap_size) {
     uintptr_t vma_start_addr = (uintptr_t)vma_start;
@@ -231,6 +246,7 @@ static bool calculate_overlap_with_checkpoint(void* vma_start, size_t vma_size,
  * Capture both ring-3 user program memory and ring-0 kernel memory contents
  * Uses a unified approach to process all VMAs in one pass
  */
+SERVERLESS_CODE
 static int capture_all_memory_contents(void) {
     struct libos_vma_info* vmas;
     size_t vma_count;
@@ -508,10 +524,10 @@ static int capture_all_memory_contents(void) {
     g_serverless_checkpoint->kernel_state.memory_mgmt.num_regions = kernel_regions;
     g_serverless_checkpoint->kernel_state.memory_mgmt.total_size = total_kernel_memory;
     
-    log_always("Captured %zu ring-3 program memory regions (total: %zu KB / %zu MB)", 
-              user_regions, total_user_memory / 1024, total_user_memory / (1024 * 1024));
-    log_always("Captured %zu ring-0 kernel memory regions (total: %zu KB / %zu MB)", 
-              kernel_regions, total_kernel_memory / 1024, total_kernel_memory / (1024 * 1024));
+    // log_always("Captured %zu ring-3 program memory regions (total: %zu KB / %zu MB)", 
+    //           user_regions, total_user_memory / 1024, total_user_memory / (1024 * 1024));
+    // log_always("Captured %zu ring-0 kernel memory regions (total: %zu KB / %zu MB)", 
+    //           kernel_regions, total_kernel_memory / 1024, total_kernel_memory / (1024 * 1024));
     
     free_vma_info_array(vmas, vma_count);
     return 0;
@@ -521,6 +537,7 @@ static int capture_all_memory_contents(void) {
  * Restore both ring-3 user program memory and ring-0 kernel memory contents from checkpoint
  * Uses unified approach: first restore ring-3 memory, then ring-0 memory
  */
+SERVERLESS_CODE
 static int restore_all_memory_contents(void) {
     /* First restore ring-3 program memory */
     if (g_serverless_checkpoint->user_state.memory_mgmt.regions) {
@@ -561,8 +578,8 @@ static int restore_all_memory_contents(void) {
             total_restored_memory += region->size;
         }
         
-        log_always("Restored %zu ring-0 kernel memory regions (total: %zu KB / %zu MB)", 
-                  region_count, total_restored_memory / 1024, total_restored_memory / (1024 * 1024));
+        // log_always("Restored %zu ring-0 kernel memory regions (total: %zu KB / %zu MB)", 
+                //   region_count, total_restored_memory / 1024, total_restored_memory / (1024 * 1024));
     } else {
         log_debug("No ring-0 kernel memory snapshots to restore");
     }
@@ -1006,6 +1023,7 @@ __attribute__((unused)) static void print_system_state(const char* phase) {
 #endif
 }
 
+SERVERLESS_CODE
 static int capture_cpu_state_from_syscall_context(struct libos_context* context) {
     if (!context) {
         log_error("No ring-3 context provided for checkpoint");
@@ -1060,20 +1078,21 @@ static int capture_cpu_state_from_syscall_context(struct libos_context* context)
  * Create checkpoint of ring-3 target program state
  * This should be called from the syscall handler with the ring-3 context
  */
+SERVERLESS_CODE
 int serverless_create_checkpoint_from_syscall(int checkpoint_point, PAL_CONTEXT* ring3_context) {
     if (g_serverless_checkpoint->metadata.checkpoint_created) {
         log_debug("Ring-3 program checkpoint already exists, skipping creation");
         return 0;
     }
 
-    log_always("g_serverless_checkpoint address = %p, enabled=%d", g_serverless_checkpoint, g_serverless_checkpoint->metadata.enabled);
+    // log_always("g_serverless_checkpoint address = %p, enabled=%d", g_serverless_checkpoint, g_serverless_checkpoint->metadata.enabled);
     
     if (!g_serverless_checkpoint->metadata.enabled) {
         log_debug("Serverless checkpointing disabled");
         return 0;
     }
 
-    log_always("=== Starting: Checkpoint Creation (point=%d) ===", checkpoint_point);
+    // log_always("=== Starting: Checkpoint Creation (point=%d) ===", checkpoint_point);
     
     /* 
      * CRITICAL: Disable interrupts during entire checkpoint process to prevent thread preemption
@@ -1122,7 +1141,7 @@ int serverless_create_checkpoint_from_syscall(int checkpoint_point, PAL_CONTEXT*
               g_serverless_checkpoint->user_state.memory_mgmt.num_regions);
     
     /* Print static allocator usage statistics */
-    CR_malloc_stats();
+    // CR_malloc_stats();
     
     log_always("=== Serverless Checkpoint Creation Completed ===");
     return 0;
@@ -1230,7 +1249,7 @@ int serverless_restore_checkpoint(void) {
              g_serverless_checkpoint->user_state.cpu_context.rip,
              g_serverless_checkpoint->user_state.cpu_context.rsp);
     
-    log_always("=== Serverless Checkpoint Restore Completed ===");
+    // log_always("=== Serverless Checkpoint Restore Completed ===");
     
     /* Return success - the syscall return mechanism will now jump to checkpointed state */
     return 0;

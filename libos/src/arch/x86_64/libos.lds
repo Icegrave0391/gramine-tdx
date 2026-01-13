@@ -91,6 +91,17 @@ SECTIONS
     __migratable_end = .;
     . = ALIGN(CONSTANT(COMMONPAGESIZE));
   }
+
+  /* Page-aligned (4KB) serverless checkpoint data section */
+  . = ALIGN(CONSTANT(COMMONPAGESIZE));
+  __serverless_data_start = .;
+  .serverless.data :
+  {
+    KEEP(*(.serverless.data))
+  }
+  __serverless_data_end = .;
+  . = ALIGN(CONSTANT(COMMONPAGESIZE));
+
   .bss            :
   {
     *(.bss .bss.*)
@@ -98,5 +109,14 @@ SECTIONS
   }
   __load_address_end = .;
   . = DATA_SEGMENT_END(.);
-}
 
+  /* Page-aligned (4KB) serverless checkpoint code section */
+  . = ALIGN(CONSTANT(COMMONPAGESIZE));
+  __serverless_text_start = .;
+  .serverless.text :
+  {
+    KEEP(*(.serverless.text))
+  }
+  __serverless_text_end = .;
+  . = ALIGN(CONSTANT(COMMONPAGESIZE));
+}
