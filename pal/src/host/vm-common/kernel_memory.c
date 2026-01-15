@@ -513,6 +513,42 @@ __attribute_no_sanitize_address
 int memory_tighten_permissions(void) {
     int ret;
 
+    /* Linker-provided symbols for PAL kernel memory layout */
+    extern char __text_start, __text_end;
+    extern char __data_start, __data_end;
+
+    /*
+     * PAL kernel W^X (Write XOR Execute) enforcement:
+     * - Data segment [__data_start, __data_end): RW- (read-write, no execute, kernel-only)
+     * - Code segment [__text_start, __text_end): R-X (read-only, execute, kernel-only)
+     */
+    uint64_t data_start = (uint64_t)&__data_start;
+    // uint64_t ro_data_end = (uint64_t)&__ro_data_end;
+    uint64_t data_end   = (uint64_t)&__data_end;
+    data_end = ALIGN_UP(data_end, PAGE_SIZE);
+
+    uint64_t text_start = (uint64_t)&__text_start;
+    uint64_t text_end   = (uint64_t)&__text_end;
+    text_end = ALIGN_UP(text_end, PAGE_SIZE);
+
+    // log_always("PAL kernel memory segments:\n");
+    // log_always("  data: [%#lx, %#lx) (RW-)\n", data_start, data_end);
+    // log_always("  code: [%#lx, %#lx) (R-X)\n", text_start, text_end);
+    /* Enforce W^X: data segment must be writable but not executable */
+    ret = memory_mark_pages_on(data_start, data_end - data_start,
+                               /*write=*/true, /*execute=*/false, /*usermode=*/false);
+    if (ret < 0)
+        return ret;
+
+    // DEBUG_PRINT_PTE(data_start);
+    
+    /* Enforce W^X: code segment must be executable but not writable */
+    ret = memory_mark_pages_on(text_start, text_end - text_start,
+                               /*write=*/false, /*execute=*/true, /*usermode=*/false);
+    if (ret < 0)
+        return ret;
+    // DEBUG_PRINT_PTE(text_start);
+
     /*
      * [0, 1MB): Legacy DOS (includes DOS area, SMM memory, System BIOS). We could not disable these
      *           pages at PAL init, because a sub-region was used for AP multicore init code/stack.
@@ -613,10 +649,10 @@ int memory_alloc(void* addr, size_t size, bool read, bool write, bool execute) {
         return 0;
     }
 
-    /* we rely on CR0.WP == 0 (Write Protect disabled), which allows to write even into read-only
-     * pages in ring 0 (otherwise for read-only allocs, we would need to call below function twice:
+    /* Fixed. We always enable CR0.WP == 1 (Write Protect enabled) for ring-0. 
+     * For read-only allocs, we would need to call below function twice:
      * once with W permission, and after memset-to-zero again, without W permission) */
-    int ret = memory_mark_pages_on((uint64_t)addr, size, write, execute, /*usermode=*/true);
+    int ret = memory_mark_pages_on((uint64_t)addr, size, true, execute, /*usermode=*/true);
     if (ret < 0)
         return ret;
 
@@ -624,6 +660,13 @@ int memory_alloc(void* addr, size_t size, bool read, bool write, bool execute) {
     asan_unpoison_region((uintptr_t)addr, size);
 #endif
     memset(addr, 0, size);
+
+    if (!write) {
+        ret = memory_mark_pages_on((uint64_t)addr, size, /*write=*/false, execute,
+                                   /*usermode=*/true);
+        if (ret < 0)
+            return ret;
+    }
     return 0;
 }
 
