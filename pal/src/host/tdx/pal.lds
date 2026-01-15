@@ -59,6 +59,8 @@ SECTIONS
       *(.rela.ifunc)
     } :ro
 
+  PROVIDE_HIDDEN (__ro_data_end = .);
+
   /* Read-writable (rw) segment */
   . = ALIGN(CONSTANT (MAXPAGESIZE));
   .data.rel.ro   : { *(.data.rel.ro) }

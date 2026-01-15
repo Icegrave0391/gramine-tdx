@@ -62,7 +62,6 @@ SECTIONS
       *(.rela.lrodata .rela.lrodata.* .rela.gnu.linkonce.lr.*)
       *(.rela.ifunc)
     } :ro
-
   /* Read-writable (rw) segment */
   . = ALIGN(CONSTANT (MAXPAGESIZE));
   .data.rel.ro   : { *(.data.rel.ro) }
@@ -78,6 +77,17 @@ SECTIONS
     __init_array_end = .;
   } :rw
   .data          : { *(.data .data.*) } :rw
+
+  /* Page-aligned (4KB) PAL serverless checkpoint data section */
+  . = ALIGN(CONSTANT(COMMONPAGESIZE));
+  __pal_serverless_data_start = .;
+  .pal.serverless.data :
+  {
+    KEEP(*(.pal.serverless.data))
+  } :rw
+  __pal_serverless_data_end = .;
+  . = ALIGN(CONSTANT(COMMONPAGESIZE));
+
   .bss           : { *(.bss .bss.*) *(COMMON) } :rw
 
   PROVIDE_HIDDEN (__data_end = .);
@@ -89,6 +99,16 @@ SECTIONS
   .fini          : { *(.fini) } :rx
   .plt           : { *(.plt) *(.iplt) } :rx
   .text          : { *(.text .stub .text.*) } :rx
+
+  /* Page-aligned (4KB) PAL serverless checkpoint code section */
+  . = ALIGN(CONSTANT(COMMONPAGESIZE));
+  __pal_serverless_text_start = .;
+  .pal.serverless.text :
+  {
+    KEEP(*(.pal.serverless.text))
+  } :rx
+  __pal_serverless_text_end = .;
+  . = ALIGN(CONSTANT(COMMONPAGESIZE));
 
   /* Align .resetvec on 64K (QEMU convention); note that the .resetvec section is defined in
    * bootstrapping kernel asm file and it is forced to be 0x80 bytes in size */
