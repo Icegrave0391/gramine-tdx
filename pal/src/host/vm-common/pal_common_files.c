@@ -381,18 +381,29 @@ int pal_common_file_map(struct pal_handle* handle, void* addr, pal_prot_flags_t 
     }
 
     /* note that we need to first mmap with write permission (to update the mem region with file
-     * contents), and then we mprotect back to read-only (if was requested) */
+     * contents), and then we mprotect back to the requested permission.
+     * Note: PAL_PROT_WRITECOPY means copy-on-write (private mapping), but the final permission
+     * should still respect the original request (e.g., R-X for code segments). */
     bool read  = !!(prot & PAL_PROT_READ);
-    bool write = !!(prot & (PAL_PROT_WRITE | PAL_PROT_WRITECOPY));
+    bool write = !!(prot & PAL_PROT_WRITE);  /* Only check WRITE, not WRITECOPY */
     bool execute = !!(prot & PAL_PROT_EXEC);
-    ret = memory_alloc(addr, size, read, /*write=*/true, execute);
+    bool usermode = !(prot & PAL_PROT_SUPERVISOR);
+    /* memory_alloc handles W^X internally: it first sets W (no X) to allow writing,
+     * then restores to the requested permissions. Pass execute here so memory_alloc
+     * knows to set X at the end for code segments. */
+
+    /* We don't care about usermode W+X */
+    bool allow_exec = execute && usermode;
+    ret = memory_alloc(addr, size, read, /*write=*/true, /*execute=*/allow_exec, usermode);
     if (ret < 0)
         return ret;
 
     if (!handle->file.chunk_hashes) {
         /* case of allowed file */
         ret = emulate_file_map_via_read(handle->file.nodeid, handle->file.fh, addr, offset, size);
-        goto out;
+        if (ret < 0)
+            goto out;
+        goto post_map;
     }
 
     /* case of trusted file */
@@ -423,9 +434,10 @@ int pal_common_file_map(struct pal_handle* handle, void* addr, pal_prot_flags_t 
         memset((char*)addr + bytes_filled, 0, size - bytes_filled);
     }
 
+post_map:
     if (!write) {
-        /* restore read-only permission */
-        ret = memory_protect(addr, size, read, /*write=*/false, execute);
+        /* restore read-only permission (may include execute for code segments) */
+        ret = memory_protect(addr, size, read, /*write=*/false, execute, usermode);
         if (ret < 0) {
             log_error("Cannot restore read-only permission during file mmap, fatal.");
             BUG();

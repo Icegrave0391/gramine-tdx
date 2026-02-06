@@ -39,6 +39,8 @@
 #include "kernel_xsave.h"
 #include "tdx_arch.h"
 
+#include "pal_serverless.h"
+
 uint64_t g_tsc_mhz;
 
 static struct pal_handle* g_first_thread_handle = NULL;
@@ -153,7 +155,7 @@ static void prot_none_memory(void) {
             return;
 
         int ret = memory_protect((void*)addr, PAGE_SIZE, /*read=*/false, /*write=*/false,
-                                 /*execute=*/false);
+                                 /*execute=*/false, /*usermode=*/false);
         if (ret < 0)
             BUG();
     }
@@ -242,6 +244,11 @@ noreturn void pal_start_c(void* hob_addr, void* this_addr) {
     uint16_t e820_table_size;
     e820_table_size = GET_HOB_LENGTH(e820_hob) - offsetof(EFI_HOB_E820_TABLE, E820Table);
     e820_table_size -= e820_table_size % sizeof(E820_TABLE_ENTRY);
+
+    // Chuqi: init intra-kernel isolation
+    ret = pks_init();
+    if (ret < 0)
+        INIT_FAIL("Failed to initialize PKS for intra-kernel isolation");
 
     ret = memory_init((e820_table_entry*)e820_hob->E820Table, e820_table_size,
                       &g_pal_public_state.memory_address_start,

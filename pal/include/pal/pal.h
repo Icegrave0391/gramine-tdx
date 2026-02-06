@@ -193,11 +193,12 @@ struct pal_public_state* PalGetPalPublicState(void);
 
 /*! memory protection flags */
 typedef uint32_t pal_prot_flags_t; /* bitfield */
-#define PAL_PROT_READ      0x1
-#define PAL_PROT_WRITE     0x2
-#define PAL_PROT_EXEC      0x4
-#define PAL_PROT_WRITECOPY 0x8
-#define PAL_PROT_MASK      0xF
+#define PAL_PROT_READ       0x1
+#define PAL_PROT_WRITE      0x2
+#define PAL_PROT_EXEC       0x4
+#define PAL_PROT_WRITECOPY  0x8
+#define PAL_PROT_SUPERVISOR 0x10  /* supervisor/kernel mode page (U/S bit = 0 in PTE) */
+#define PAL_PROT_MASK       0x1F
 
 struct pal_initial_mem_range {
     uintptr_t start;
@@ -1082,4 +1083,13 @@ void PalServerlessCheckpointBarrierAcquire(void);
  * to resume their normal operations after checkpoint/restore is complete.
  */
 void PalServerlessCheckpointBarrierRelease(void);
+
+
+/*!
+ * \brief Initialize serverless module.
+ *
+ * Enable PKS, memory monitoring, and serverless C/R.
+ */
+void PalServerlessModuleInit(uint64_t libos_sm_data_base, uint64_t libos_sm_data_end,
+                             uint64_t libos_sm_code_base, uint64_t libos_sm_code_end);
 #undef INSIDE_PAL_H

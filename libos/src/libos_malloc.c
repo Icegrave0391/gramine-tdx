@@ -10,6 +10,7 @@
  */
 
 #include "asan.h"
+#include "libos_flags_conv.h"
 #include "libos_internal.h"
 #include "libos_lock.h"
 #include "libos_utils.h"
@@ -35,13 +36,14 @@ void* __system_malloc(size_t size) {
     size_t alloc_size = ALLOC_ALIGN_UP(size);
     void* addr = NULL;
 
-    int ret = bkeep_mmap_any(alloc_size, PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS | VMA_INTERNAL, NULL, 0, "slab", &addr);
+    int prot = PROT_READ | PROT_WRITE;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS | VMA_INTERNAL;
+    int ret = bkeep_mmap_any(alloc_size, prot, flags, NULL, 0, "slab", &addr);
     if (ret < 0) {
         return NULL;
     }
 
-    ret = PalVirtualMemoryAlloc(addr, alloc_size, PAL_PROT_WRITE | PAL_PROT_READ);
+    ret = PalVirtualMemoryAlloc(addr, alloc_size, LINUX_PROT_TO_PAL(prot, flags));
     if (ret < 0) {
         log_error("failed to allocate memory: %s", pal_strerror(ret));
         void* tmp_vma = NULL;

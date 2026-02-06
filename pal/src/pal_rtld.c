@@ -547,7 +547,24 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
         void*  map_addr = (void*)(c->start + g_entrypoint_map.l_base_diff);
         size_t map_size = c->map_end - c->start;
 
-        ret = _PalStreamMap(handle, map_addr, c->prot | PAL_PROT_WRITECOPY, c->map_off, map_size);
+        /* Debug: print segment info */
+        log_debug("Loading LibOS segment[%zu]: addr=%p size=0x%lx prot=%c%c%c",
+                  i, map_addr, map_size,
+                  (c->prot & PAL_PROT_READ)  ? 'R' : '-',
+                  (c->prot & PAL_PROT_WRITE) ? 'W' : '-',
+                  (c->prot & PAL_PROT_EXEC)  ? 'X' : '-');
+
+        /* Check for W^X violation before mapping */
+        if ((c->prot & PAL_PROT_WRITE) && (c->prot & PAL_PROT_EXEC)) {
+            log_warning("LibOS segment[%zu] at %p has W+X permissions! Removing W for security.",
+                        i, map_addr);
+            c->prot &= ~PAL_PROT_WRITE;  /* Enforce W^X by removing W */
+        }
+
+        /* LibOS is loaded by PAL and runs in supervisor mode (ring-0), so we mark it as
+         * supervisor-accessible only. User apps loaded by LibOS won't have this flag. */
+        ret = _PalStreamMap(handle, map_addr, c->prot | PAL_PROT_WRITECOPY | PAL_PROT_SUPERVISOR,
+                            c->map_off, map_size);
         if (ret < 0) {
             log_error("Failed to map segment from ELF file");
             goto out;
@@ -562,7 +579,8 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
         if (c->alloc_end == c->map_end)
             continue;
 
-        ret = _PalVirtualMemoryAlloc((void*)c->map_end, c->alloc_end - c->map_end, c->prot);
+        ret = _PalVirtualMemoryAlloc((void*)c->map_end, c->alloc_end - c->map_end,
+                                     c->prot | PAL_PROT_SUPERVISOR);
         if (ret < 0) {
             log_error("Failed to zero-fill the rest of segment from ELF file");
             goto out;
@@ -586,11 +604,13 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
         goto out;
 
     /* zero out the unused parts of loaded segments and perform relocations on loaded segments
-     * (need to first change memory permissions to writable and then revert permissions back) */
+     * (need to first change memory permissions to writable and then revert permissions back).
+     * Important: We enforce W^X by removing execute permission when adding write permission. */
     for (size_t i = 0; i < loadcmds_cnt; i++) {
         struct loadcmd* c = &loadcmds[i];
-        ret = _PalVirtualMemoryProtect((void*)c->start, c->alloc_end - c->start,
-                                       c->prot | PAL_PROT_WRITE);
+        /* Enforce W^X: when adding write permission, remove execute permission */
+        pal_prot_flags_t temp_prot = (c->prot & ~PAL_PROT_EXEC) | PAL_PROT_WRITE | PAL_PROT_SUPERVISOR;
+        ret = _PalVirtualMemoryProtect((void*)c->start, c->alloc_end - c->start, temp_prot);
         if (ret < 0) {
             log_error("Failed to add write memory protection on the segment from ELF file");
             goto out;
@@ -610,7 +630,8 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
 
     for (size_t i = 0; i < loadcmds_cnt; i++) {
         struct loadcmd* c = &loadcmds[i];
-        ret = _PalVirtualMemoryProtect((void*)c->start, c->alloc_end - c->start, c->prot);
+        ret = _PalVirtualMemoryProtect((void*)c->start, c->alloc_end - c->start,
+                                       c->prot | PAL_PROT_SUPERVISOR);
         if (ret < 0) {
             log_error("Failed to revert write memory protection on the segment from ELF file");
             goto out;
@@ -621,7 +642,8 @@ static int create_and_relocate_entrypoint(PAL_HANDLE handle, const char* uri,
         l_relro_addr += g_entrypoint_map.l_base_diff;
         elf_addr_t start = ALLOC_ALIGN_DOWN(l_relro_addr);
         elf_addr_t end   = ALLOC_ALIGN_UP(l_relro_addr + l_relro_size);
-        ret = _PalVirtualMemoryProtect((void*)start, end - start, PAL_PROT_READ);
+        ret = _PalVirtualMemoryProtect((void*)start, end - start,
+                                       PAL_PROT_READ | PAL_PROT_SUPERVISOR);
         if (ret < 0) {
             log_error("Failed to apply read-only memory protection on the RELRO memory area");
             goto out;

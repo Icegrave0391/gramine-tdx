@@ -35,6 +35,8 @@
 #include "kernel_vmm_inputs.h"
 #include "kernel_xsave.h"
 
+#include "pal_serverless.h"
+
 uint64_t g_tsc_mhz;
 
 static struct pal_handle* g_first_thread_handle = NULL;
@@ -139,7 +141,7 @@ static void zero_out_memory_and_prot_none(void) {
 
         memset((void*)addr, 0, PAGE_SIZE);
         int ret = memory_protect((void*)addr, PAGE_SIZE, /*read=*/false, /*write=*/false,
-                                 /*execute=*/false);
+                                 /*execute=*/false, /*usermode=*/false);
         if (ret < 0)
             BUG();
     }
@@ -172,6 +174,11 @@ noreturn void pal_start_c(void) {
 
     e820_table_entry e820[E820_NR_ENTRIES]; /* 16*20 = 320B, ok to allocate on stack */
     size_t e820_size;
+
+    // Chuqi: init intra-kernel isolation
+    ret = pks_init();
+    if (ret < 0)
+        INIT_FAIL("Failed to initialize PKS for intra-kernel isolation");
 
     ret = e820_table_init((char*)e820, &e820_size, sizeof(e820));
     if (ret < 0)

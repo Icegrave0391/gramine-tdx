@@ -316,12 +316,13 @@ static void* _vma_malloc(size_t size) {
     void* addr = NULL;
     size = ALLOC_ALIGN_UP(size);
 
-    if (bkeep_mmap_any(size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | VMA_INTERNAL,
-                       NULL, 0, "vma", &addr) < 0) {
+    int prot = PROT_READ | PROT_WRITE;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS | VMA_INTERNAL;
+    if (bkeep_mmap_any(size, prot, flags, NULL, 0, "vma", &addr) < 0) {
         return NULL;
     }
 
-    int ret = PalVirtualMemoryAlloc(addr, size, PAL_PROT_WRITE | PAL_PROT_READ);
+    int ret = PalVirtualMemoryAlloc(addr, size, LINUX_PROT_TO_PAL(prot, flags));
     if (ret < 0) {
         struct libos_vma* vmas_to_free = NULL;
 

@@ -46,9 +46,19 @@ int memory_preload_ranges(e820_table_entry* e820_entries, size_t e820_entries_si
                           int (*callback)(uintptr_t addr, size_t size, const char* comment));
 int memory_tighten_permissions(void);
 
-int memory_alloc(void* addr, size_t size, bool read, bool write, bool execute);
-int memory_protect(void* addr, size_t size, bool read, bool write, bool execute);
+int memory_alloc(void* addr, size_t size, bool read, bool write, bool execute, bool usermode);
+int memory_protect(void* addr, size_t size, bool read, bool write, bool execute, bool usermode);
 int memory_free(void* addr, size_t size);
 
 int memory_init(e820_table_entry* e820_entries, size_t e820_entries_size,
                 void** out_memory_address_start, void** out_memory_address_end);
+
+static inline void DEBUG_PRINT_PTE(uint64_t addr) {
+    uint64_t* pte_addr;
+    int ret = memory_find_page_table_entry(addr, &pte_addr);
+    if (ret < 0) {
+        log_error("memory_find_page_table_entry(%#lx) failed: %d\n", addr, ret);
+        return;
+    }
+    log_always("PTE for addr %#lx: %#lx\n", addr, *pte_addr);
+}

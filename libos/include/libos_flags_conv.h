@@ -18,6 +18,7 @@
 #include "linux_abi/fs.h"
 #include "linux_abi/memory.h"
 #include "pal.h"
+#include "libos_vma.h"
 
 static inline pal_prot_flags_t LINUX_PROT_TO_PAL(int prot, int map_flags) {
     assert(WITHIN_MASK(prot, PROT_NONE | PROT_READ | PROT_WRITE | PROT_EXEC
@@ -25,7 +26,8 @@ static inline pal_prot_flags_t LINUX_PROT_TO_PAL(int prot, int map_flags) {
     return (prot & PROT_READ  ? PAL_PROT_READ  : 0) |
            (prot & PROT_WRITE ? PAL_PROT_WRITE : 0) |
            (prot & PROT_EXEC  ? PAL_PROT_EXEC  : 0) |
-           (map_flags & MAP_PRIVATE ? PAL_PROT_WRITECOPY : 0);
+           (map_flags & MAP_PRIVATE ? PAL_PROT_WRITECOPY : 0) |
+           (map_flags & VMA_INTERNAL ? PAL_PROT_SUPERVISOR : 0);
 }
 
 static inline int PAL_PROT_TO_LINUX(pal_prot_flags_t prot) {

@@ -18,7 +18,8 @@ int _PalVirtualMemoryAlloc(void* addr, size_t size, pal_prot_flags_t prot) {
     bool read    = !!(prot & PAL_PROT_READ);
     bool write   = !!(prot & (PAL_PROT_WRITE | PAL_PROT_WRITECOPY));
     bool execute = !!(prot & PAL_PROT_EXEC);
-    return memory_alloc(addr, size, read, write, execute);
+    bool usermode = !(prot & PAL_PROT_SUPERVISOR);
+    return memory_alloc(addr, size, read, write, execute, usermode);
 }
 
 int _PalVirtualMemoryFree(void* addr, size_t size) {
@@ -39,7 +40,8 @@ int _PalVirtualMemoryProtect(void* addr, size_t size, pal_prot_flags_t prot) {
     bool read    = !!(prot & PAL_PROT_READ);
     bool write   = !!(prot & (PAL_PROT_WRITE | PAL_PROT_WRITECOPY));
     bool execute = !!(prot & PAL_PROT_EXEC);
-    return memory_protect(addr, size, read, write, execute);
+    bool usermode = !(prot & PAL_PROT_SUPERVISOR);
+    return memory_protect(addr, size, read, write, execute, usermode);
 }
 
 unsigned long _PalMemoryQuota(void) {

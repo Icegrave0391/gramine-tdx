@@ -23,6 +23,7 @@
 #include "kernel_memory.h"
 #include "kernel_multicore.h"
 #include "kernel_virtio.h"
+#include "pal_serverless.h"
 
 static_assert(PAGE_SIZE == 4096, "unexpected PAGE_SIZE (expected 4K)");
 
@@ -71,83 +72,69 @@ int memory_free_shared_region(void* addr, size_t size) {
 
 __attribute_no_sanitize_address
 int memory_find_page_table_entry(uint64_t addr, uint64_t** out_pte_addr) {
-    assert(g_pml4_table_base);
-    uint64_t* pml4_table = (uint64_t*)g_pml4_table_base;
-
-    /* the mask covers bits 12:43 which covers the address space [0, 16TB); note that we do not
-     * cover up to 12:51 because bit 47 or 51 can be specially used (e.g. "shared" bit in TDX) */
-    const uint64_t page_table_entry_addr_mask = 0x00000ffffffff000UL;
-
-    /* there is a single entry in the PML4 table, see also memory_pagetables_init();
-     * in this entry, bits 12:51 contain the address of the PDPT table */
-    uint64_t* pdpt_table = (uint64_t*)(pml4_table[0] & page_table_entry_addr_mask);
-
-    /* each PDPT table entry covers 1GB of memory, starting from addr 0x00 */
-    size_t pdpt_table_idx = addr / 1024 / 1024 / 1024;
-    uint64_t* pd_table = (uint64_t*)(pdpt_table[pdpt_table_idx] & page_table_entry_addr_mask);
-
-    /* each PD table entry covers 2MB of memory in the 1GB memory region determined via PDPT table
-     * entry (recall that there are 512 PD entries in one PD table) */
-    size_t pd_table_idx = (addr / 1024 / 1024 / 2) % 512;
-    uint64_t* pt_table = (uint64_t*)(pd_table[pd_table_idx] & page_table_entry_addr_mask);
-
-    /* each PT table entry covers 4KB of memory in the 2MB memory region determined via PD table
-     * entry (recall that there are 512 PD entries in one PT table) */
-    size_t pt_table_idx = (addr / 1024 / 4) % 512;
-
-    /* sanity check: must arrive at the same page address as in `addr` */
-    uint64_t page_addr = pt_table[pt_table_idx] & page_table_entry_addr_mask;
-    if ((addr & page_table_entry_addr_mask) != page_addr)
-        return -PAL_ERROR_INVAL;
-
-    *out_pte_addr = &pt_table[pt_table_idx];
-    return 0;
+    return SM_find_page_table_entry(addr, out_pte_addr);
 }
 
 __attribute_no_sanitize_address
 int memory_mark_pages_off(uint64_t addr, size_t size) {
-    for (uint64_t mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
-        uint64_t* pte_addr;
-        int ret = memory_find_page_table_entry(mark_addr, &pte_addr);
-        if (ret < 0)
-            return ret;
-        *pte_addr &= ~1UL;
+    // for (uint64_t mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
+    //     uint64_t* pte_addr;
+    //     int ret = memory_find_page_table_entry(mark_addr, &pte_addr);
+    //     if (ret < 0)
+    //         return ret;
+    //     *pte_addr &= ~1UL;
+    // }
+    // Chuqi: switch to the call gate
+    int ret = SM_update_memory_perms(addr, size, /*write=*/false, /*execute=*/false, /*present=*/false, /*usermode=*/false);
+    if (ret < 0) {
+        return ret;
     }
     return send_invalidate_tlb_ipi_and_wait((void*)addr, size, /*invalidate_on_this_cpu=*/true);
 }
 
 __attribute_no_sanitize_address
 int memory_mark_pages_on(uint64_t addr, size_t size, bool write, bool execute, bool usermode) {
-    for (uint64_t mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
-        uint64_t* pte_addr;
-        int ret = memory_find_page_table_entry(mark_addr, &pte_addr);
-        if (ret < 0)
-            return ret;
+    // for (uint64_t mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
+    //     uint64_t* pte_addr;
+    //     int ret = memory_find_page_table_entry(mark_addr, &pte_addr);
+    //     if (ret < 0)
+    //         return ret;
 
-        uint64_t bits = 1UL; /* present bit is always set, since page is at least readable */
-        if (write)
-            bits |= 1UL << 1;
-        if (usermode)
-            bits |= 1UL << 2;
-        if (!execute)
-            bits |= 1UL << 63; /* NX/XD bit */
-        *pte_addr = (*pte_addr & ~((1UL << 63) + 7UL)) | bits;
+    //     uint64_t bits = 1UL; /* present bit is always set, since page is at least readable */
+    //     if (write)
+    //         bits |= 1UL << 1;
+    //     if (usermode)
+    //         bits |= 1UL << 2;
+    //     if (!execute)
+    //         bits |= 1UL << 63; /* NX/XD bit */
+    //     *pte_addr = (*pte_addr & ~((1UL << 63) + 7UL)) | bits;
+    // }
+
+    // Chuqi: switch to the call gate
+    int ret = SM_update_memory_perms(addr, size, write, execute, true, usermode);
+    if (ret < 0) {
+        return ret;
     }
     return send_invalidate_tlb_ipi_and_wait((void*)addr, size, /*invalidate_on_this_cpu=*/true);
 }
 
 __attribute_no_sanitize_address
 int memory_mark_pages_strong_uncacheable(uint64_t addr, size_t size, bool mark) {
-    for (uint64_t mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
-        uint64_t* pte_addr;
-        int ret = memory_find_page_table_entry(mark_addr, &pte_addr);
-        if (ret < 0)
-            return ret;
+    // for (uint64_t mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
+    //     uint64_t* pte_addr;
+    //     int ret = memory_find_page_table_entry(mark_addr, &pte_addr);
+    //     if (ret < 0)
+    //         return ret;
 
-        if (mark)
-            *pte_addr |= 1UL << 4; /* PCD = Page-level cache disable */
-        else
-            *pte_addr &= ~(1UL << 4);
+    //     if (mark)
+    //         *pte_addr |= 1UL << 4; /* PCD = Page-level cache disable */
+    //     else
+    //         *pte_addr &= ~(1UL << 4);
+    // }
+    // Chuqi: switch to the call gate
+    int ret = SM_update_memory_uncacheable(addr, size, mark);
+    if (ret < 0) {
+        return ret;
     }
     return send_invalidate_tlb_ipi_and_wait((void*)addr, size, /*invalidate_on_this_cpu=*/true);
 }
@@ -634,7 +621,7 @@ int memory_init(e820_table_entry* e820_entries, size_t e820_entries_size,
     return 0;
 }
 
-int memory_alloc(void* addr, size_t size, bool read, bool write, bool execute) {
+int memory_alloc(void* addr, size_t size, bool read, bool write, bool execute, bool usermode) {
     if ((uintptr_t)addr < SHARED_MEM_ADDR + SHARED_MEM_SIZE &&
             SHARED_MEM_ADDR < (uintptr_t)addr + size) {
         /* [addr, addr+size) at least partially overlaps shared memory, should be impossible */
@@ -649,10 +636,10 @@ int memory_alloc(void* addr, size_t size, bool read, bool write, bool execute) {
         return 0;
     }
 
-    /* Fixed. We always enable CR0.WP == 1 (Write Protect enabled) for ring-0. 
-     * For read-only allocs, we would need to call below function twice:
-     * once with W permission, and after memset-to-zero again, without W permission) */
-    int ret = memory_mark_pages_on((uint64_t)addr, size, true, execute, /*usermode=*/true);
+    /* First allocate with write permission to zero the memory.
+     * For W^X enforcement, we do NOT set execute here - caller must use memory_protect
+     * after completing all writes to set final permissions. */
+    int ret = memory_mark_pages_on((uint64_t)addr, size, /*write=*/true, /*execute=*/false, usermode);
     if (ret < 0)
         return ret;
 
@@ -661,16 +648,16 @@ int memory_alloc(void* addr, size_t size, bool read, bool write, bool execute) {
 #endif
     memset(addr, 0, size);
 
-    if (!write) {
-        ret = memory_mark_pages_on((uint64_t)addr, size, /*write=*/false, execute,
-                                   /*usermode=*/true);
-        if (ret < 0)
-            return ret;
+    /* If caller doesn't need write permission and doesn't need execute, remove W now.
+     * If caller needs execute, they must call memory_protect() after writing data.
+     * If caller needs write (without execute), keep the W permission. */
+    if (execute || !write) { /* We disallow kernel mode W+X */
+        ret = memory_mark_pages_on((uint64_t)addr, size, (write && usermode), execute, usermode);
     }
-    return 0;
+    return ret;
 }
 
-int memory_protect(void* addr, size_t size, bool read, bool write, bool execute) {
+int memory_protect(void* addr, size_t size, bool read, bool write, bool execute, bool usermode) {
     if ((uintptr_t)addr < SHARED_MEM_ADDR + SHARED_MEM_SIZE &&
             SHARED_MEM_ADDR < (uintptr_t)addr + size) {
         /* [addr, addr+size) at least partially overlaps shared memory, should be impossible */
@@ -688,7 +675,7 @@ int memory_protect(void* addr, size_t size, bool read, bool write, bool execute)
 #ifdef ASAN
     asan_unpoison_region((uintptr_t)addr, size);
 #endif
-    return memory_mark_pages_on((uint64_t)addr, size, write, execute, /*usermode=*/true);
+    return memory_mark_pages_on((uint64_t)addr, size, write, execute, usermode);
 }
 
 int memory_free(void* addr, size_t size) {
