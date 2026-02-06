@@ -35,11 +35,11 @@
  * Custom section attributes for page-aligned checkpoint code and data.
  * These sections will be placed in separate page-aligned regions by the linker.
  * 
- * - .serverless.data: All static/global data for checkpoint (page-aligned)
- * - .serverless.text: All checkpoint-related functions (page-aligned)
+ * - .libos.serverless.data: All static/global data for checkpoint (page-aligned)
+ * - .libos.serverless.text: All checkpoint-related functions (page-aligned)
  */
-#define SERVERLESS_DATA   __attribute__((section(".serverless.data")))
-#define SERVERLESS_CODE   __attribute__((section(".serverless.text")))
+#define SERVERLESS_DATA   __attribute__((section(".libos.serverless.data")))
+#define SERVERLESS_CODE   __attribute__((section(".libos.serverless.text")))
 
 /* Forward declarations for checkpoint structures */
 struct memory_region_snapshot;
@@ -1306,6 +1306,24 @@ int serverless_clear_checkpoint(void) {
  * Called during LibOS initialization.
  */
 int init_serverless_checkpoint(void) {
+    extern char __libos_serverless_data_start[];
+    extern char __libos_serverless_data_end[];
+    extern char __libos_serverless_text_start[];
+    extern char __libos_serverless_text_end[];
+    uint64_t libos_serverless_data_start = (uint64_t)__libos_serverless_data_start;
+    uint64_t libos_serverless_data_end = (uint64_t)__libos_serverless_data_end;
+    libos_serverless_data_end = ALIGN_UP(libos_serverless_data_end, PAGE_SIZE); /* Page-align the end address */
+
+    uint64_t libos_serverless_code_start = (uint64_t)__libos_serverless_text_start;
+    uint64_t libos_serverless_code_end = (uint64_t)__libos_serverless_text_end;
+    libos_serverless_code_end = ALIGN_UP(libos_serverless_code_end, PAGE_SIZE); /* Page-align the end address */
+
+    log_always("Initializing Serverless Checkpoint System");
+    log_always("LibOS Serverless Data Section: 0x%lx - 0x%lx", 
+              libos_serverless_data_start, libos_serverless_data_end);
+    log_always("LibOS Serverless Code Section: 0x%lx - 0x%lx", 
+              libos_serverless_code_start, libos_serverless_code_end);
+
     /* Initialize checkpoint base and end addresses */
     g_checkpoint_base = (uint64_t)&g_serverless_checkpoint_section.checkpoint_metadata;
     g_checkpoint_end = g_checkpoint_base + sizeof(g_serverless_checkpoint_section);
@@ -1317,6 +1335,12 @@ int init_serverless_checkpoint(void) {
     
     /* Initialize the static allocator */
     CR_malloc_reset();
+
+    /* Invoke Pal's part */
+    PalServerlessModuleInit(libos_serverless_data_start, 
+                            libos_serverless_data_end,
+                            libos_serverless_code_start,
+                            libos_serverless_code_end);
     
     /* Calculate page-aligned checkpoint section start for debugging */
     uintptr_t checkpoint_section_start = (uintptr_t)&g_serverless_checkpoint_section & ~0xFFF; /* Page-aligned start */

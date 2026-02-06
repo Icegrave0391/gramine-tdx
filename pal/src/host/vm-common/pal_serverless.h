@@ -83,3 +83,16 @@ void PalServerlessCheckpointBarrierAcquire(void);
  * to resume their normal operations after checkpoint/restore is complete.
  */
 void PalServerlessCheckpointBarrierRelease(void);
+
+void PalServerlessModuleInit(uint64_t libos_sm_data_base, uint64_t libos_sm_data_end,
+                             uint64_t libos_sm_code_base, uint64_t libos_sm_code_end);
+
+
+
+int pks_init(void);
+/*
+ * Memory management interface
+ */
+int SM_find_page_table_entry(uint64_t addr, uint64_t** out_pte_addr);
+int SM_update_memory_perms(int64_t addr, size_t size, bool write, bool execute, bool present, bool usermode);
+int SM_update_memory_uncacheable(int64_t addr, size_t size, bool mark);

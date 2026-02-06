@@ -14,7 +14,278 @@
 #include "pal_internal.h"
 #include "pal_topology.h"
 
+// For page table primitives
+#include "kernel_memory.h"
+
+/*
+ * Custom section attributes for page-aligned checkpoint code and data.
+ * These sections will be placed in separate page-aligned regions by the linker.
+ * 
+ * - .pal.serverless.data: All static/global data for checkpoint (page-aligned)
+ * - .pal.serverless.text: All checkpoint-related functions (page-aligned)
+ */
+#define SERVERLESS_DATA   __attribute__((section(".pal.serverless.data")))
+#define SERVERLESS_CODE   __attribute__((section(".pal.serverless.text")))
+
+/* PKS-related protection APIs */
+#define MSR_IA32_PKRS   0x000006E1
+#define CR4_PKS         (1ULL << 24)
+#define CR0_WP          (1ULL << 16)
+#define PTE_KEY_SHIFT   59
+#define PTE_KEY_BITS    4
+#define PTE_KEY_MASK    (((1ULL << PTE_KEY_BITS) - 1) << PTE_KEY_SHIFT)
+typedef uint32_t u32;
+typedef uint64_t u64;
+
+#define PKS_PROT_KEY    1
+#define PKS_DISABLE_R   (1ULL << 0)
+#define PKS_DISABLE_W   (1ULL << 1)
+
+
+static inline void __cpuid(u32 leaf, u32 subleaf,
+                         u32 *eax, u32 *ebx, u32 *ecx, u32 *edx)
+{
+    __asm__ volatile("cpuid"
+        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
+        : "a"(leaf), "c"(subleaf));
+}
+
+static bool cpu_has_pks(void)
+{
+    u32 eax, ebx, ecx, edx;
+    __cpuid(7, 0, &eax, &ebx, &ecx, &edx);
+    return (edx >> 31) & 1;
+}
+
+int pks_init(void) {
+    if (!cpu_has_pks()) {
+        log_always("CPU does not support PKS");
+        return -PAL_ERROR_INVAL;
+    }
+
+    /* Enable CR0.WP (PKS's W permission is dependent on CR0.WP) */
+    u64 cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= CR0_WP; // Set WP bit
+    __asm__ volatile("mov %0, %%cr0" :: "r"(cr0));
+
+
+    /* Ensure CR4.PKS */
+    u64 cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= CR4_PKS; // Set PKS bit
+    __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
+
+    log_always("PKS initialized: CR4=0x%lx, CR0=0x%lx", cr4, cr0);
+    return 0;
+}
+
+static inline void __set_pte_protection(u64 *pte, bool should_protect) {
+    u64 key = should_protect ? PKS_PROT_KEY : 0;
+    *pte = (*pte & ~PTE_KEY_MASK) | ((key << PTE_KEY_SHIFT) & PTE_KEY_MASK);
+}
+
+static inline void __fake_naive_entry_gate(void) {
+    // simply grant protection key RW access
+    u64 pkrs = rdmsr(MSR_IA32_PKRS);
+    pkrs = pkrs & ~((PKS_DISABLE_W | PKS_DISABLE_R) << (PKS_PROT_KEY * 2)); // Disable R/W for key 1
+    wrmsr(MSR_IA32_PKRS, pkrs);
+}
+
+static inline void __fake_naive_exit_gate(void) {
+    // simply revoke protection key RW access
+    u64 pkrs = rdmsr(MSR_IA32_PKRS);
+    pkrs = pkrs | ((PKS_DISABLE_W | PKS_DISABLE_R) << (PKS_PROT_KEY * 2)); // Enable R/W for key 1
+    wrmsr(MSR_IA32_PKRS, pkrs);
+}
+
+/* Linker-provided symbols for PAL serverless sections */
+extern char __pal_serverless_data_start;
+extern char __pal_serverless_data_end;
+extern char __pal_serverless_text_start;
+extern char __pal_serverless_text_end;
+
+/* === Memory Isolation === */
+SERVERLESS_DATA
+static u64 g_libos_sm_data_start;
+SERVERLESS_DATA
+static u64 g_libos_sm_data_end;
+SERVERLESS_DATA
+static u64 g_libos_sm_code_start;
+SERVERLESS_DATA
+static u64 g_libos_sm_code_end;
+
+SERVERLESS_DATA
+static u64 g_pal_sm_data_start;
+SERVERLESS_DATA
+static u64 g_pal_sm_data_end;
+SERVERLESS_DATA
+static u64 g_pal_sm_code_start;
+SERVERLESS_DATA
+static u64 g_pal_sm_code_end;
+
+#define PTE_ADDR_MASK   0x00000ffffffff000ULL
+#define PTE_FLAG_MASK   0x0000000000000FFFULL
+
+/* check if the target memory overlaps with the serverless module */
+static bool _is_page_within_serverless_module(u64 addr) {
+    assert(IS_ALIGNED(addr, PAGE_SIZE));
+    if ((addr >= g_pal_sm_data_start && addr < g_pal_sm_data_end) ||
+        (addr >= g_pal_sm_code_start && addr < g_pal_sm_code_end) ||
+        (addr >= g_libos_sm_data_start && addr < g_libos_sm_data_end) ||
+        (addr >= g_libos_sm_code_start && addr < g_libos_sm_code_end)) {
+        return true;
+    }
+    return false;
+}
+
+static bool _is_page_a_PTP(u64 addr) {
+    assert(IS_ALIGNED(addr, PAGE_SIZE));
+    if (addr >= PAGE_TABLES_ADDR && addr < PAGE_TABLES_ADDR + PAGE_TABLES_SIZE) {
+        return true;
+    }
+    return false;
+}
+
+/* Page table interface */
+
+/*
+ * Perform page table walk to find the PTE for the given virtual address `addr`.
+ * We allow the kernel to do page table walk. No checks are required.
+ */
+SERVERLESS_CODE
+static int _do_find_page_table_entry(uint64_t addr, uint64_t** out_pte_addr) {
+    assert(g_pml4_table_base);
+    uint64_t* pml4_table = (uint64_t*)g_pml4_table_base;
+
+    /* the mask covers bits 12:43 which covers the address space [0, 16TB); note that we do not
+     * cover up to 12:51 because bit 47 or 51 can be specially used (e.g. "shared" bit in TDX) */
+    const uint64_t page_table_entry_addr_mask = 0x00000ffffffff000UL;
+
+    /* there is a single entry in the PML4 table, see also memory_pagetables_init();
+     * in this entry, bits 12:51 contain the address of the PDPT table */
+    uint64_t* pdpt_table = (uint64_t*)(pml4_table[0] & page_table_entry_addr_mask);
+
+    /* each PDPT table entry covers 1GB of memory, starting from addr 0x00 */
+    size_t pdpt_table_idx = addr / 1024 / 1024 / 1024;
+    uint64_t* pd_table = (uint64_t*)(pdpt_table[pdpt_table_idx] & page_table_entry_addr_mask);
+
+    /* each PD table entry covers 2MB of memory in the 1GB memory region determined via PDPT table
+     * entry (recall that there are 512 PD entries in one PD table) */
+    size_t pd_table_idx = (addr / 1024 / 1024 / 2) % 512;
+    uint64_t* pt_table = (uint64_t*)(pd_table[pd_table_idx] & page_table_entry_addr_mask);
+
+    /* each PT table entry covers 4KB of memory in the 2MB memory region determined via PD table
+     * entry (recall that there are 512 PD entries in one PT table) */
+    size_t pt_table_idx = (addr / 1024 / 4) % 512;
+
+    /* sanity check: must arrive at the same page address as in `addr` */
+    uint64_t page_addr = pt_table[pt_table_idx] & page_table_entry_addr_mask;
+    if ((addr & page_table_entry_addr_mask) != page_addr)
+        return -PAL_ERROR_INVAL;
+
+    *out_pte_addr = &pt_table[pt_table_idx];
+
+    return 0;
+}
+
+SERVERLESS_CODE
+int SM_find_page_table_entry(uint64_t addr, uint64_t** out_pte_addr) {
+
+    // __fake_naive_entry_gate();
+
+    int ret = 0;
+
+    ret = _do_find_page_table_entry(addr, out_pte_addr);    
+
+    // __fake_naive_exit_gate();
+    return ret;
+}
+
+SERVERLESS_CODE
+int SM_update_memory_perms(int64_t addr, size_t size, bool write, bool execute, bool present, bool usermode) {
+    int ret = 0;
+    
+    /* Debug: always print permission changes for usermode addresses */
+    if (usermode && present) {
+        log_debug("SM_update_memory_perms: range 0x%lx-0x%lx, W=%d X=%d present=%d usermode=%d",
+                  addr, addr + size, write, execute, present, usermode);
+    }
+
+    for (u64 mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
+        u64 *pte_addr;
+        ret = _do_find_page_table_entry(mark_addr, &pte_addr);
+        if (ret < 0)
+            goto out;
+        
+        /* Enforcement: flat mapping */
+        assert(((*pte_addr & PTE_ADDR_MASK) == mark_addr));
+    
+        /* Enforcement: PTP and SM memory are attached with PKS key */
+        if (_is_page_a_PTP(mark_addr) || _is_page_within_serverless_module(mark_addr)) {
+            __set_pte_protection(pte_addr, true);
+            usermode = false; // PTP and SM memory cannot be usermode accessible
+            assert(present);  // PTP and SM memory must be present
+        }
+
+        if (!present) {
+            *pte_addr &= ~1UL; /* mark not present */
+            continue;
+        }
+
+        /* Enforcement: Kernel mode W^X */
+        // assert(!(write && execute));
+        if (!usermode && write && execute) {
+            log_always("Warning: Setting KERN range 0x%lx - 0x%lx attempting to set both write and execute permissions on address 0x%lx", addr, addr + size, mark_addr);
+        }
+
+        uint64_t bits = 1UL; /* present bit is always set, since page is at least readable */
+        if (write)
+            bits |= 1UL << 1;
+        if (usermode)
+            bits |= 1UL << 2;
+        if (!execute)
+            bits |= 1UL << 63; /* NX/XD bit */
+        
+        *pte_addr = (*pte_addr & ~((1UL << 63) + 7UL)) | bits;
+        
+        /* Debug: verify PTE for execute segments */
+        if (execute && present && mark_addr == addr) {
+            log_debug("  PTE after update: 0x%lx (P=%d W=%d U=%d NX=%d)",
+                      *pte_addr,
+                      (int)(*pte_addr & 1),
+                      (int)((*pte_addr >> 1) & 1),
+                      (int)((*pte_addr >> 2) & 1),
+                      (int)((*pte_addr >> 63) & 1));
+        }
+    }
+out:
+    return ret;
+}
+
+SERVERLESS_CODE
+int SM_update_memory_uncacheable(int64_t addr, size_t size, bool mark) {
+    int ret = 0;
+    for (u64 mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
+        u64 *pte_addr;
+        ret = _do_find_page_table_entry(mark_addr, &pte_addr);
+        if (ret < 0)
+            goto out;
+
+        /* Enforcement: flat mapping */
+        assert(((*pte_addr & PTE_ADDR_MASK) == mark_addr));
+
+        if (mark)
+            *pte_addr |= 1UL << 4; /* PCD bit */
+        else
+            *pte_addr &= ~(1UL << 4);
+    }
+out:
+    return ret;
+}
+
 /* Helper function to get thread state name */
+SERVERLESS_CODE
 static const char* get_thread_state_name(enum thread_state state) {
     switch (state) {
         case THREAD_STOPPED:  return "STOPPED";
@@ -26,6 +297,7 @@ static const char* get_thread_state_name(enum thread_state state) {
 }
 
 /* Helper function to get PAL handle from thread */
+SERVERLESS_CODE
 static struct pal_handle* get_pal_handle_from_thread(struct thread* thread) {
     if (!thread)
         return NULL;
@@ -38,6 +310,7 @@ static struct pal_handle* get_pal_handle_from_thread(struct thread* thread) {
 }
 
 /* Callback function to print information about a single PAL thread */
+SERVERLESS_CODE
 static void print_pal_thread_info(struct thread* thread, size_t index) {
     if (!thread) {
         log_always("Thread[%zu]: NULL thread pointer", index);
@@ -116,6 +389,7 @@ static void print_pal_thread_info(struct thread* thread, size_t index) {
 }
 
 /* Internal function to walk through all PAL threads and print detailed information */
+SERVERLESS_CODE
 static void walk_pal_thread_list(void) {
     log_always("=== PAL Thread List Walkthrough ===");
     
@@ -143,6 +417,7 @@ static void walk_pal_thread_list(void) {
  * Returns:
  *   Number of vCPUs (1 to MAX_NUM_CPUS)
  */
+SERVERLESS_CODE
 uint32_t PalServerlessGetVcpuCount(void) {
     /* Return the global vCPU count that was set during PAL initialization */
     return g_num_cpus;
@@ -162,6 +437,7 @@ uint32_t PalServerlessGetVcpuCount(void) {
  * Returns:
  *   0 on success, negative error code on failure
  */
+SERVERLESS_CODE
 int PalServerlessGetCpuTopology(size_t* threads_cnt, size_t* cores_cnt, size_t* sockets_cnt) {
     if (!threads_cnt || !cores_cnt || !sockets_cnt) {
         return -PAL_ERROR_INVAL;
@@ -187,6 +463,7 @@ int PalServerlessGetCpuTopology(size_t* threads_cnt, size_t* cores_cnt, size_t* 
  * Returns:
  *   Total memory size in bytes, or 0 if not available
  */
+SERVERLESS_CODE
 size_t PalServerlessGetMemTotal(void) {
     struct pal_public_state* pal_state = PalGetPalPublicState();
     if (!pal_state) {
@@ -202,6 +479,7 @@ size_t PalServerlessGetMemTotal(void) {
  * Returns:
  *   String describing the host type (e.g., "TDX", "VM"), or NULL if not available
  */
+SERVERLESS_CODE
 const char* PalServerlessGetHostType(void) {
     struct pal_public_state* pal_state = PalGetPalPublicState();
     if (!pal_state) {
@@ -220,6 +498,7 @@ const char* PalServerlessGetHostType(void) {
  * Returns:
  *   true if the thread is online, false otherwise
  */
+SERVERLESS_CODE
 bool PalServerlessIsCpuOnline(size_t thread_id) {
     struct pal_public_state* pal_state = PalGetPalPublicState();
     if (!pal_state || thread_id >= pal_state->topo_info.threads_cnt) {
@@ -238,6 +517,7 @@ bool PalServerlessIsCpuOnline(size_t thread_id) {
  * Returns:
  *   Number of PAL internal threads
  */
+SERVERLESS_CODE
 size_t PalServerlessGetPalThreadCount(void) {
     size_t count = sched_get_thread_count();
     
@@ -254,6 +534,7 @@ size_t PalServerlessGetPalThreadCount(void) {
  * to pause their operations. This ensures system state consistency during
  * checkpoint/restore operations.
  */
+SERVERLESS_CODE
 void PalServerlessCheckpointBarrierAcquire(void) {
     checkpoint_barrier_acquire_all();
 }
@@ -264,6 +545,51 @@ void PalServerlessCheckpointBarrierAcquire(void) {
  * This function clears per-CPU barrier flags, allowing idle and background threads
  * to resume their normal operations after checkpoint/restore is complete.
  */
+SERVERLESS_CODE
 void PalServerlessCheckpointBarrierRelease(void) {
     checkpoint_barrier_release_all();
+}
+
+static void memory_set_protection_key(u64 base, u64 end) {
+    for (uint64_t addr = base; addr < end; addr += PAGE_SIZE) {
+        uint64_t *pte_addr = NULL;
+        if (memory_find_page_table_entry(addr, &pte_addr) == 0 && pte_addr) {
+            __set_pte_protection(pte_addr, true);
+        } else {
+            log_always("Warning: Failed to find PTE for PAL SM data address 0x%lx", addr);
+        }
+    }
+}
+
+SERVERLESS_CODE
+void PalServerlessModuleInit(uint64_t libos_sm_data_base, uint64_t libos_sm_data_end,
+                             uint64_t libos_sm_code_base, uint64_t libos_sm_code_end) {
+    u64 pal_sm_data_base = (u64)&__pal_serverless_data_start;
+    u64 pal_sm_data_end = (u64)&__pal_serverless_data_end;
+    u64 pal_sm_code_base = (u64)&__pal_serverless_text_start;
+    u64 pal_sm_code_end = (u64)&__pal_serverless_text_end;
+
+    g_pal_sm_data_start = pal_sm_data_base;
+    g_pal_sm_data_end = pal_sm_data_end;
+    g_pal_sm_code_start = pal_sm_code_base;
+    g_pal_sm_code_end = pal_sm_code_end;
+
+    g_libos_sm_data_start = libos_sm_data_base;
+    g_libos_sm_data_end =  libos_sm_data_end;
+    g_libos_sm_code_start = libos_sm_code_base;
+    g_libos_sm_code_end = libos_sm_code_end;
+
+    /* Set up PKS protection key for LibOS's serverless security monitor module */
+    assert(IS_ALIGNED(libos_sm_data_base, PAGE_SIZE) && IS_ALIGNED(libos_sm_data_end, PAGE_SIZE));
+    assert(IS_ALIGNED(libos_sm_code_base, PAGE_SIZE) && IS_ALIGNED(libos_sm_code_end, PAGE_SIZE));
+
+    memory_set_protection_key(libos_sm_data_base, libos_sm_data_end);
+    memory_set_protection_key(libos_sm_code_base, libos_sm_code_end);
+
+    /* Set up PKS protection key for PAL's serverless security monitor module */
+    memory_set_protection_key(pal_sm_code_base, pal_sm_code_end);
+    memory_set_protection_key(pal_sm_data_base, pal_sm_data_end);
+    
+    /* Set up PKS protection key for the entire page table */
+    memory_set_protection_key(PAGE_TABLES_ADDR, PAGE_TABLES_ADDR + PAGE_TABLES_SIZE);
 }

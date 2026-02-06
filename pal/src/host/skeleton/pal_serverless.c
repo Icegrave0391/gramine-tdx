@@ -62,3 +62,8 @@ void PalServerlessCheckpointBarrierAcquire(void) {
 void PalServerlessCheckpointBarrierRelease(void) {
     /* No-op for skeleton PAL - no multi-core synchronization needed */
 }
+
+void PalServerlessModuleInit(uint64_t libos_sm_data_base, uint64_t libos_sm_data_end,
+                             uint64_t libos_sm_code_base, uint64_t libos_sm_code_end) {
+    /* No-op for skeleton PAL - no special initialization needed */
+}

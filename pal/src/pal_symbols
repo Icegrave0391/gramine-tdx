@@ -60,3 +60,4 @@ PalServerlessIsCpuOnline
 PalServerlessGetPalThreadCount
 PalServerlessCheckpointBarrierAcquire
 PalServerlessCheckpointBarrierRelease
+PalServerlessModuleInit

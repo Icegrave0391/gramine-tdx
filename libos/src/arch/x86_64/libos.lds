@@ -6,6 +6,7 @@ SECTIONS
 {
   /* Read-only sections, merged into text segment; */
   __load_address = .;
+  __libos_data_start = .;
   . = SEGMENT_START("text-segment", 0) + SIZEOF_HEADERS;
   .note.gnu.build-id : { *(.note.gnu.build-id) }
   .hash          : { *(.hash) }
@@ -38,6 +39,7 @@ SECTIONS
       *(.rela.plt)
       *(.rela.iplt)
     }
+  __libos_text_start = .;
   .init          : { *(.init) }
   .plt           : { *(.plt) *(.iplt) }
   .text :
@@ -53,6 +55,7 @@ SECTIONS
   }
   .eh_frame_hdr  : { *(.eh_frame_hdr) }
   .eh_frame      : ONLY_IF_RO { *(.eh_frame) }
+  __libos_text_end = .;
 
   /* now adjust the address for the data segment */
   . = DATA_SEGMENT_ALIGN (CONSTANT (MAXPAGESIZE), CONSTANT (COMMONPAGESIZE));
@@ -94,13 +97,13 @@ SECTIONS
 
   /* Page-aligned (4KB) serverless checkpoint data section */
   . = ALIGN(CONSTANT(COMMONPAGESIZE));
-  __serverless_data_start = .;
-  .serverless.data :
+  __libos_serverless_data_start = .;
+  .libos.serverless.data :
   {
-    KEEP(*(.serverless.data))
+    KEEP(*(.libos.serverless.data))
   }
-  __serverless_data_end = .;
   . = ALIGN(CONSTANT(COMMONPAGESIZE));
+  __libos_serverless_data_end = .;
 
   .bss            :
   {
@@ -112,11 +115,11 @@ SECTIONS
 
   /* Page-aligned (4KB) serverless checkpoint code section */
   . = ALIGN(CONSTANT(COMMONPAGESIZE));
-  __serverless_text_start = .;
-  .serverless.text :
+  __libos_serverless_text_start = .;
+  .libos.serverless.text :
   {
-    KEEP(*(.serverless.text))
+    KEEP(*(.libos.serverless.text))
   }
-  __serverless_text_end = .;
   . = ALIGN(CONSTANT(COMMONPAGESIZE));
+  __libos_serverless_text_end = .;
 }
