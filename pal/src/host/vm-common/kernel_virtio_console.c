@@ -29,6 +29,43 @@
 struct virtio_console* g_console = NULL;
 bool g_console_trigger_bottomhalf = false;
 
+/*
+ * Report whether `page` (a page-aligned address) holds virtio-console private state that must be
+ * excluded from serverless checkpoint/restore.
+ *
+ * The console's driver-side bookkeeping (buffer positions, virtqueue indices) is paired with ring
+ * buffers in memory shared with the VMM. C/R does not roll back the shared half, so restoring the
+ * private half alone makes the driver re-publish descriptors the VMM already consumed - the visible
+ * symptom is console output being reprinted after every restore.
+ */
+bool virtio_console_is_private_state_page(uint64_t page) {
+    if (!g_console)
+        return false;
+
+#define TOUCHES_PAGE(obj, size) \
+    ((obj) && (uint64_t)(obj) < page + PAGE_SIZE && page < (uint64_t)(obj) + (size))
+
+    if (TOUCHES_PAGE(g_console, sizeof(*g_console)))
+        return true;
+    if (TOUCHES_PAGE(g_console->rq_buf, VIRTIO_CONSOLE_RQ_BUF_SIZE))
+        return true;
+
+    struct virtqueue* vqs[] = { g_console->rq, g_console->tq, g_console->control_rq,
+                                g_console->control_tq };
+    for (size_t i = 0; i < ARRAY_SIZE(vqs); i++) {
+        struct virtqueue* vq = vqs[i];
+        if (!vq)
+            continue;
+        if (TOUCHES_PAGE(vq, sizeof(*vq)))
+            return true;
+        if (TOUCHES_PAGE(vq->next_free_desc, vq->queue_size * sizeof(uint16_t)))
+            return true;
+    }
+#undef TOUCHES_PAGE
+
+    return false;
+}
+
 /* coarse-grained locks to sync RX and TX operations on multi-core systems, see kernel_virtio.h */
 static spinlock_t g_console_receive_lock = INIT_SPINLOCK_UNLOCKED;
 static spinlock_t g_console_transmit_lock = INIT_SPINLOCK_UNLOCKED;

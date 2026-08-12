@@ -106,6 +106,36 @@ out:
     return ret;
 }
 
+/*
+ * Report whether `page` (page-aligned) belongs to a PAL kernel thread stack (or the XSAVE area
+ * allocated together with it), so that serverless checkpoint/restore can skip it.
+ *
+ * These stacks hold the live execution context of *other* kernel threads (idle, bottomhalves) that
+ * were preempted while C/R runs. Rolling them back to their checkpoint-time contents makes those
+ * threads resume on stale frames and return to a garbage address (observed as an instruction-fetch
+ * #PF at RIP=0). Kernel execution state is not part of the function's memory, so it must not be
+ * rolled back.
+ */
+bool thread_is_kernel_stack_page(uint64_t page) {
+    size_t stack_and_fpregs_size = THREAD_STACK_SIZE + ALT_STACK_SIZE + g_xsave_size
+                                                     + VM_XSAVE_ALIGN;
+    bool found = false;
+
+    /* C/R runs with interrupts disabled and all other CPUs parked, but take the lock anyway to stay
+     * consistent with the other accessors of the map */
+    spinlock_lock(&g_thread_stack_lock);
+    for (size_t i = 0; i < g_thread_stack_num; i++) {
+        uint64_t base = (uint64_t)g_thread_stack_map[i].stack;
+        if (base && base < page + PAGE_SIZE && page < base + stack_and_fpregs_size) {
+            found = true;
+            break;
+        }
+    }
+    spinlock_unlock(&g_thread_stack_lock);
+
+    return found;
+}
+
 noreturn void thread_free_stack_and_die(void* thread_stack, int* clear_child_tid) {
     /* we do not free thread stack (and fpregs memory region allocated with it) but instead mark it
      * as recycled, see thread_get_stack_and_fpregs() */
@@ -170,16 +200,18 @@ int thread_helper_create(int (*callback)(void*), struct thread** out_thread) {
     if (!thread)
         return -PAL_ERROR_NOMEM;
 
-    /* allocate both the stack and the fpregs (XSAVE) memory region in one go; note that
-     * fpregs may be allocated not at VM_XSAVE_ALIGN boundary, so need to add a margin for that */
+    /* Allocate the stack and the fpregs (XSAVE) region via the common helper, so that the stack gets
+     * registered in g_thread_stack_map. Serverless C/R consults that map to avoid rolling back
+     * kernel stacks, and these helper threads (idle/bottomhalves) are exactly the ones parked by the
+     * C/R barrier. Helper threads are never terminated, so the entry just stays marked as used. */
     assert(g_xsave_size);
-    void* stack_base = malloc(THREAD_STACK_SIZE + ALT_STACK_SIZE + g_xsave_size + VM_XSAVE_ALIGN);
-    if (!stack_base) {
+    void* stack = NULL;
+    void* fpregs = NULL;
+    int ret = thread_get_stack_and_fpregs(&stack, &fpregs);
+    if (ret < 0) {
         free(thread);
-        return -PAL_ERROR_NOMEM;
+        return ret;
     }
-    void* stack  = stack_base;
-    void* fpregs = stack_base + THREAD_STACK_SIZE + ALT_STACK_SIZE;
 
     thread_setup(thread, fpregs, stack, callback, /*param=*/NULL);
     thread->is_helper = true;

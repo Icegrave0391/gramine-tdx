@@ -96,6 +96,9 @@ struct thread {
 DEFINE_LISTP(thread);
 
 int thread_get_stack_and_fpregs(void** out_stack, void** out_fpregs);
+
+/* Used by serverless checkpoint/restore to skip kernel thread stacks, see the definition */
+bool thread_is_kernel_stack_page(uint64_t page);
 noreturn void thread_free_stack_and_die(void* thread_stack, int* clear_child_tid);
 
 void thread_setup(struct thread* thread, void* fpregs, void* stack, int (*callback)(void*),

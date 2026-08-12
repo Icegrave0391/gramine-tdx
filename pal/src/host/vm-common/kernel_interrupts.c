@@ -16,6 +16,7 @@
 #include "cpu.h"
 #include "pal_error.h"
 #include "pal_internal.h"
+#include "pal_serverless.h"
 
 #include "kernel_apic.h"
 #include "kernel_interrupts.h"
@@ -109,6 +110,14 @@ void isr_c(struct isr_regs* regs) {
                       faulted_addr, pte_addr, *pte_addr);
             log_error("       error code=0x%lx rip=0x%lx rsp=0x%lx rax=0x%lx", regs->error_code,
                       regs->rip, regs->rsp, regs->rax);
+            /* error-code bit 5 (PK) means a protection-key violation: supervisor code touched
+             * key-1 memory (page tables, security-monitor sections, checkpoint arena) outside an
+             * SM gate. Call it out explicitly, it is otherwise easy to mistake for a normal #PF. */
+            if (regs->error_code & (1UL << 5)) {
+                log_error("       cause: PKS protection-key violation (key=%lu, PKRS=0x%lx)",
+                          (*pte_addr >> PTE_KEY_SHIFT) & ((1UL << PTE_KEY_BITS) - 1),
+                          rdmsr(MSR_IA32_PKRS));
+            }
             triple_fault();
             break;
         case 20:

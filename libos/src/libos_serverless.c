@@ -125,7 +125,7 @@ struct serverless_checkpoint_state {
 /* Page-aligned checkpoint structure that occupies exactly one page */
 #define SIZE_PAGE               (1 << 12)
 #define SIZE_MB                 (1024 * 1024)
-#define SERVERLESS_CR_SIZE      (30 * SIZE_MB) /* 15 MB for checkpoint data */
+#define SERVERLESS_CR_SIZE      (64 * SIZE_MB) /* checkpoint arena; Python workloads need >= 64MB */
 
 struct serverless_checkpoint_section {
     /* the first page contains metadata */
@@ -182,6 +182,24 @@ SERVERLESS_CODE
 static void CR_malloc_reset(void) {
     g_static_alloc_offset = 0;
     log_debug("CR_malloc_reset: Static allocator reset, available space: %zu bytes", (size_t)SERVERLESS_CR_SIZE);
+}
+
+/*
+ * Discard a partially built snapshot after an arena-exhaustion failure.
+ *
+ * All snapshot memory comes from CR_malloc(), a bump allocator over the static arena; its pointers
+ * must never be passed to free(). Rolling the bump pointer back to zero releases everything at
+ * once, so we just drop the region arrays and reset the allocator.
+ */
+SERVERLESS_CODE
+static void discard_partial_snapshot(void) {
+    g_serverless_checkpoint->user_state.memory_mgmt.regions = NULL;
+    g_serverless_checkpoint->user_state.memory_mgmt.num_regions = 0;
+    g_serverless_checkpoint->user_state.memory_mgmt.total_size = 0;
+    g_serverless_checkpoint->kernel_state.memory_mgmt.regions = NULL;
+    g_serverless_checkpoint->kernel_state.memory_mgmt.num_regions = 0;
+    g_serverless_checkpoint->kernel_state.memory_mgmt.total_size = 0;
+    CR_malloc_reset();
 }
 
 /* Get current allocator statistics */
@@ -243,6 +261,49 @@ static bool calculate_overlap_with_checkpoint(void* vma_start, size_t vma_size,
 }
 
 /*
+ * Copy a region page by page, skipping pages that must not be copied.
+ *
+ * Two kinds of pages are skipped:
+ *
+ * 1. Pages that are not writable in the page tables. LibOS VMA permissions are not a reliable
+ *    indicator of the actual PTE permissions: the "PAL internal memory" VMA, for instance, is
+ *    marked RW but covers read-only LibOS text/rodata pages. Since pks_init() enables CR0.WP,
+ *    writing a read-only page from ring-0 faults. Read-only pages also cannot be dirtied by the
+ *    ring-3 function, so they need neither capture nor restore.
+ *
+ * 2. Pages holding kernel state that must not be rolled back: virtio driver indices (paired with
+ *    rings in VMM-shared memory that C/R does not roll back) and PAL kernel thread stacks (holding
+ *    the suspended context of threads parked by the C/R barrier). Rolling these back makes the
+ *    driver re-publish already-consumed descriptors (duplicated console output, broken I/O
+ *    completions) or makes parked threads resume on stale frames and jump to a garbage address.
+ *
+ * `dir_is_capture` selects the direction: capture copies memory -> snapshot, restore copies
+ * snapshot -> memory. Skipped pages are left untouched in the destination.
+ */
+SERVERLESS_CODE
+static size_t copy_writable_pages(void* snapshot, void* mem, size_t size, bool dir_is_capture) {
+    size_t copied = 0;
+
+    for (size_t off = 0; off < size; off += PAGE_SIZE) {
+        size_t chunk = MIN(PAGE_SIZE, size - off);
+        uint64_t page = (uint64_t)mem + off;
+
+        if (!PalServerlessIsPageWritable(page))
+            continue;
+        if (PalServerlessIsNonRollbackPage(page))
+            continue;
+
+        if (dir_is_capture)
+            memcpy((char*)snapshot + off, (char*)mem + off, chunk);
+        else
+            memcpy((char*)mem + off, (char*)snapshot + off, chunk);
+        copied += chunk;
+    }
+
+    return copied;
+}
+
+/*
  * Capture both ring-3 user program memory and ring-0 kernel memory contents
  * Uses a unified approach to process all VMAs in one pass
  */
@@ -267,8 +328,10 @@ static int capture_all_memory_contents(void) {
     for (size_t i = 0; i < vma_count; i++) {
         struct libos_vma_info* vma = &vmas[i];
         
-        /* Check for user memory regions */
-        if (!(vma->flags & VMA_INTERNAL) && !(vma->flags & VMA_UNMAPPED) && (vma->prot & (PROT_READ | PROT_WRITE))) {
+        /* Check for user memory regions; only writable regions are captured: read-only regions
+         * cannot be dirtied by the function, and writing them back during restore would fault
+         * (ring-0 writes to read-only pages are blocked because pks_init() sets CR0.WP=1) */
+        if (!(vma->flags & VMA_INTERNAL) && !(vma->flags & VMA_UNMAPPED) && (vma->prot & PROT_WRITE)) {
             user_regions++;
         }
         
@@ -321,9 +384,7 @@ static int capture_all_memory_contents(void) {
         g_serverless_checkpoint->kernel_state.memory_mgmt.regions = 
             CR_malloc(sizeof(struct memory_region_snapshot) * kernel_regions);
         if (!g_serverless_checkpoint->kernel_state.memory_mgmt.regions) {
-            if (user_regions > 0) {
-                free(g_serverless_checkpoint->user_state.memory_mgmt.regions);
-            }
+            discard_partial_snapshot();
             free_vma_info_array(vmas, vma_count);
             return -ENOMEM;
         }
@@ -338,8 +399,8 @@ static int capture_all_memory_contents(void) {
     for (size_t i = 0; i < vma_count; i++) {
         struct libos_vma_info* vma = &vmas[i];
         
-        /* Process user memory regions */
-        if (!(vma->flags & VMA_INTERNAL) && !(vma->flags & VMA_UNMAPPED) && (vma->prot & (PROT_READ | PROT_WRITE))) {
+        /* Process user memory regions (must match the filter in the counting loop above) */
+        if (!(vma->flags & VMA_INTERNAL) && !(vma->flags & VMA_UNMAPPED) && (vma->prot & PROT_WRITE)) {
             struct memory_region_snapshot* region = &g_serverless_checkpoint->user_state.memory_mgmt.regions[user_idx];
             
             region->start_addr = vma->addr;
@@ -354,19 +415,15 @@ static int capture_all_memory_contents(void) {
             /* Allocate snapshot memory */
             region->snapshot_data = CR_malloc(region->size);
             if (!region->snapshot_data) {
-                /* Cleanup on failure */
-                for (size_t j = 0; j < user_idx; j++) {
-                    free(g_serverless_checkpoint->user_state.memory_mgmt.regions[j].snapshot_data);
-                }
-                for (size_t j = 0; j < kernel_idx; j++) {
-                    free(g_serverless_checkpoint->kernel_state.memory_mgmt.regions[j].snapshot_data);
-                }
+                /* Cleanup on failure: CR_malloc is a bump allocator over the static arena, so
+                 * individual allocations cannot be freed. Discard the partial snapshot wholesale. */
+                discard_partial_snapshot();
                 free_vma_info_array(vmas, vma_count);
                 return -ENOMEM;
             }
             
             /* Copy memory content directly (no overlap to skip) */
-            memcpy(region->snapshot_data, region->start_addr, region->size);
+            copy_writable_pages(region->snapshot_data, region->start_addr, region->size, /*dir_is_capture=*/true);
             total_user_memory += region->size;
             
             log_debug("Captured ring-3 memory region %p-%p (%zu bytes) [%s]", 
@@ -412,18 +469,14 @@ static int capture_all_memory_contents(void) {
                     /* Allocate and copy memory */
                     region->snapshot_data = CR_malloc(region->size);
                     if (!region->snapshot_data) {
-                        /* Cleanup on failure */
-                        for (size_t j = 0; j < user_idx; j++) {
-                            free(g_serverless_checkpoint->user_state.memory_mgmt.regions[j].snapshot_data);
-                        }
-                        for (size_t j = 0; j < kernel_idx; j++) {
-                            free(g_serverless_checkpoint->kernel_state.memory_mgmt.regions[j].snapshot_data);
-                        }
+                        /* Cleanup on failure: CR_malloc is a bump allocator over the static arena, so
+                         * individual allocations cannot be freed. Discard the partial snapshot wholesale. */
+                        discard_partial_snapshot();
                         free_vma_info_array(vmas, vma_count);
                         return -ENOMEM;
                     }
                     
-                    memcpy(region->snapshot_data, region->start_addr, region->size);
+                    copy_writable_pages(region->snapshot_data, region->start_addr, region->size, /*dir_is_capture=*/true);
                     total_kernel_memory += region->size;
                     
                     log_debug("Captured ring-0 kernel memory region %p-%p (%zu bytes) [%s] - BEFORE overlap", 
@@ -455,18 +508,14 @@ static int capture_all_memory_contents(void) {
                     /* Allocate and copy memory */
                     region->snapshot_data = CR_malloc(region->size);
                     if (!region->snapshot_data) {
-                        /* Cleanup on failure */
-                        for (size_t j = 0; j < user_idx; j++) {
-                            free(g_serverless_checkpoint->user_state.memory_mgmt.regions[j].snapshot_data);
-                        }
-                        for (size_t j = 0; j < kernel_idx; j++) {
-                            free(g_serverless_checkpoint->kernel_state.memory_mgmt.regions[j].snapshot_data);
-                        }
+                        /* Cleanup on failure: CR_malloc is a bump allocator over the static arena, so
+                         * individual allocations cannot be freed. Discard the partial snapshot wholesale. */
+                        discard_partial_snapshot();
                         free_vma_info_array(vmas, vma_count);
                         return -ENOMEM;
                     }
                     
-                    memcpy(region->snapshot_data, region->start_addr, region->size);
+                    copy_writable_pages(region->snapshot_data, region->start_addr, region->size, /*dir_is_capture=*/true);
                     total_kernel_memory += region->size;
                     
                     log_debug("Captured ring-0 kernel memory region %p-%p (%zu bytes) [%s] - AFTER overlap", 
@@ -493,18 +542,14 @@ static int capture_all_memory_contents(void) {
                 /* Allocate and copy memory */
                 region->snapshot_data = CR_malloc(region->size);
                 if (!region->snapshot_data) {
-                    /* Cleanup on failure */
-                    for (size_t j = 0; j < user_idx; j++) {
-                        free(g_serverless_checkpoint->user_state.memory_mgmt.regions[j].snapshot_data);
-                    }
-                    for (size_t j = 0; j < kernel_idx; j++) {
-                        free(g_serverless_checkpoint->kernel_state.memory_mgmt.regions[j].snapshot_data);
-                    }
+                    /* Cleanup on failure: CR_malloc is a bump allocator over the static arena, so
+                     * individual allocations cannot be freed. Discard the partial snapshot wholesale. */
+                    discard_partial_snapshot();
                     free_vma_info_array(vmas, vma_count);
                     return -ENOMEM;
                 }
                 
-                memcpy(region->snapshot_data, region->start_addr, region->size);
+                copy_writable_pages(region->snapshot_data, region->start_addr, region->size, /*dir_is_capture=*/true);
                 total_kernel_memory += region->size;
                 
                 log_debug("Captured ring-0 kernel memory region %p-%p (%zu bytes) [%s]", 
@@ -551,7 +596,7 @@ static int restore_all_memory_contents(void) {
                      region->comment);
             
             /* Restore user memory directly (no overlap possible) */
-            memcpy(region->start_addr, region->snapshot_data, region->size);
+            copy_writable_pages(region->snapshot_data, region->start_addr, region->size, /*dir_is_capture=*/false);
         }
         log_debug("Restored %zu ring-3 program memory regions", g_serverless_checkpoint->user_state.memory_mgmt.num_regions);
     } else {
@@ -574,7 +619,7 @@ static int restore_all_memory_contents(void) {
                      region->comment);
             
             /* Restore memory directly (no overlap since regions were split during capture) */
-            memcpy(region->start_addr, region->snapshot_data, region->size);
+            copy_writable_pages(region->snapshot_data, region->start_addr, region->size, /*dir_is_capture=*/false);
             total_restored_memory += region->size;
         }
         
@@ -1271,25 +1316,12 @@ int serverless_clear_checkpoint(void) {
         return 0;
     }
     
-    /* Free ring-3 memory region snapshots */
-    if (g_serverless_checkpoint->user_state.memory_mgmt.regions) {
-        for (size_t i = 0; i < g_serverless_checkpoint->user_state.memory_mgmt.num_regions; i++) {
-            free(g_serverless_checkpoint->user_state.memory_mgmt.regions[i].snapshot_data);
-        }
-        free(g_serverless_checkpoint->user_state.memory_mgmt.regions);
-        g_serverless_checkpoint->user_state.memory_mgmt.regions = NULL;
-        g_serverless_checkpoint->user_state.memory_mgmt.num_regions = 0;
-    }
-    
-    /* Free ring-0 kernel memory snapshots */
-    if (g_serverless_checkpoint->kernel_state.memory_mgmt.regions) {
-        for (size_t i = 0; i < g_serverless_checkpoint->kernel_state.memory_mgmt.num_regions; i++) {
-            free(g_serverless_checkpoint->kernel_state.memory_mgmt.regions[i].snapshot_data);
-        }
-        free(g_serverless_checkpoint->kernel_state.memory_mgmt.regions);
-        g_serverless_checkpoint->kernel_state.memory_mgmt.regions = NULL;
-        g_serverless_checkpoint->kernel_state.memory_mgmt.num_regions = 0;
-    }
+    /* Drop all region snapshots. They live in the CR_malloc bump arena, so they must not be passed
+     * to free(); resetting the arena below releases them all at once. */
+    g_serverless_checkpoint->user_state.memory_mgmt.regions = NULL;
+    g_serverless_checkpoint->user_state.memory_mgmt.num_regions = 0;
+    g_serverless_checkpoint->kernel_state.memory_mgmt.regions = NULL;
+    g_serverless_checkpoint->kernel_state.memory_mgmt.num_regions = 0;
     
     /* Reset state */
     bool enabled = g_serverless_checkpoint->metadata.enabled; /* Preserve enabled flag */
@@ -1336,14 +1368,17 @@ int init_serverless_checkpoint(void) {
     /* Initialize the static allocator */
     CR_malloc_reset();
 
+    /* Sanity-check the arena layout while key-1 memory is still freely accessible: the
+     * PalServerlessModuleInit() call below tags this section with the PKS key and arms the
+     * deny-by-default policy, after which these globals are only reachable inside a gate. */
+    uintptr_t checkpoint_section_start = (uintptr_t)&g_serverless_checkpoint_section & ~0xFFF; /* Page-aligned start */
+    assert(checkpoint_section_start == (uintptr_t)g_checkpoint_base);
+
     /* Invoke Pal's part */
     PalServerlessModuleInit(libos_serverless_data_start, 
                             libos_serverless_data_end,
                             libos_serverless_code_start,
                             libos_serverless_code_end);
-    
-    /* Calculate page-aligned checkpoint section start for debugging */
-    uintptr_t checkpoint_section_start = (uintptr_t)&g_serverless_checkpoint_section & ~0xFFF; /* Page-aligned start */
-    assert(checkpoint_section_start == (uintptr_t)g_checkpoint_base);
+
     return 0;
 }

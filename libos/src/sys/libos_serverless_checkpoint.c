@@ -43,6 +43,14 @@ long libos_syscall_serverless_checkpoint(long operation, long arg1, long arg2) {
     __UNUSED(arg1);
     __UNUSED(arg2); 
     
+    /*
+     * Open the PKS gate for the whole handler: the C/R engine reads and writes its metadata and
+     * snapshot arena, which live in the key-1 protected `.libos.serverless.data` section and are
+     * inaccessible to ordinary kernel code. The gate is closed again on every return path below.
+     */
+    uint64_t gate = PalServerlessGateEnter();
+    long ret_val;
+
     switch (operation) {
         case OP_CREATE_CHECKPOINT: {
             int checkpoint_point = 0;
@@ -50,22 +58,26 @@ long libos_syscall_serverless_checkpoint(long operation, long arg1, long arg2) {
             int ret = serverless_create_checkpoint(checkpoint_point);
             if (ret < 0) {
                 log_error("Failed to create checkpoint: %s", unix_strerror(ret));
-                return ret;
+                ret_val = ret;
+                break;
             }
-            return 0;
+            ret_val = 0;
+            break;
         }
         
         case OP_RESTORE_CHECKPOINT: {
             int ret = serverless_restore_checkpoint();
             if (ret < 0) {
                 log_error("Failed to restore checkpoint: %s", unix_strerror(ret));
-                return ret;
+                ret_val = ret;
+                break;
             }
             
             /* Note: If restore is successful, execution should not reach here
              * as the process state should be reset to the checkpoint */
             log_debug("Serverless checkpoint restored successfully");
-            return 0;
+            ret_val = 0;
+            break;
         }
         
         case OP_CHECK_STATUS: {
@@ -75,13 +87,18 @@ long libos_syscall_serverless_checkpoint(long operation, long arg1, long arg2) {
             int status = serverless_has_checkpoint() ? 1 : 0;
             
             log_debug("Checkpoint status check: %s", status ? "available" : "not available");
-            return status;
+            ret_val = status;
+            break;
         }
         
         default:
             log_error("Invalid serverless checkpoint operation: %ld", operation);
-            return -ENOSYS;
+            ret_val = -ENOSYS;
+            break;
     }
+
+    PalServerlessGateExit(gate);
+    return ret_val;
 }
 
 /*

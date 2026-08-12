@@ -191,6 +191,9 @@ int virtio_console_init(struct virtio_pci_regs* pci_regs, struct virtio_console_
 
 extern struct virtio_console* g_console;
 extern bool g_console_trigger_bottomhalf;
+
+/* Used by serverless checkpoint/restore to skip console driver private state, see the definition */
+bool virtio_console_is_private_state_page(uint64_t page);
 void thread_wakeup_console(void);
 
 /* -------------------------------------- virtio-fs -------------------------------------------- */

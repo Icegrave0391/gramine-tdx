@@ -14,6 +14,7 @@
 #include "pal_error.h"
 #include "pal_host.h"
 #include "pal_internal.h"
+#include "pal_serverless.h"
 
 #include "kernel_acpi_madt.h"
 #include "kernel_apic.h"
@@ -283,6 +284,11 @@ noreturn void pal_start_ap_c(uint32_t cpu_idx) {
 
     /* BSP (main processor) should have found XCR0 features, AP just needs to set them */
     __asm__ volatile("xsetbv" : : "a"(g_xcr0), "c"(0), "d"(0));
+
+    /* CR0.WP, CR4.PKS and PKRS are all per-CPU: without this the key-1 tags in the (BSP-built) page
+     * tables would simply be ignored on this AP, bypassing intra-kernel isolation entirely */
+    if (pks_init() == 0)
+        pks_arm_current_cpu();
 
     if (strcmp(XSTRINGIFY(HOST_TYPE), "TDX")) {
         /* in TDX, APIC is already in x2APIC mode */

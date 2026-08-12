@@ -14,8 +14,11 @@
 #include "pal_internal.h"
 #include "pal_topology.h"
 
-// For page table primitives
+/* For page table primitives */
 #include "kernel_memory.h"
+
+/* For virtio device state that must be excluded from checkpoint/restore */
+#include "kernel_virtio.h"
 
 /*
  * Custom section attributes for page-aligned checkpoint code and data.
@@ -27,17 +30,13 @@
 #define SERVERLESS_DATA   __attribute__((section(".pal.serverless.data")))
 #define SERVERLESS_CODE   __attribute__((section(".pal.serverless.text")))
 
-/* PKS-related protection APIs */
-#define MSR_IA32_PKRS   0x000006E1
+/* PKS-related protection APIs (MSR_IA32_PKRS, PKS_PROT_KEY, PTE_KEY_* live in pal_serverless.h) */
 #define CR4_PKS         (1ULL << 24)
 #define CR0_WP          (1ULL << 16)
-#define PTE_KEY_SHIFT   59
-#define PTE_KEY_BITS    4
 #define PTE_KEY_MASK    (((1ULL << PTE_KEY_BITS) - 1) << PTE_KEY_SHIFT)
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-#define PKS_PROT_KEY    1
 #define PKS_DISABLE_R   (1ULL << 0)
 #define PKS_DISABLE_W   (1ULL << 1)
 
@@ -85,19 +84,55 @@ static inline void __set_pte_protection(u64 *pte, bool should_protect) {
     *pte = (*pte & ~PTE_KEY_MASK) | ((key << PTE_KEY_SHIFT) & PTE_KEY_MASK);
 }
 
-static inline void __fake_naive_entry_gate(void) {
-    // simply grant protection key RW access
-    u64 pkrs = rdmsr(MSR_IA32_PKRS);
-    pkrs = pkrs & ~((PKS_DISABLE_W | PKS_DISABLE_R) << (PKS_PROT_KEY * 2)); // Disable R/W for key 1
-    wrmsr(MSR_IA32_PKRS, pkrs);
+/*
+ * PKS call gate.
+ *
+ * PKRS is a per-CPU register holding 2 bits (AD=access-disable, WD=write-disable) per key. The
+ * default armed state denies both read and write for PKS_PROT_KEY, so ordinary kernel code cannot
+ * touch page tables, the SM sections or the checkpoint arena. The gate opens key 1 for the duration
+ * of an SM operation and closes it on exit.
+ *
+ * Two properties matter for correctness:
+ *
+ * - Interrupts are masked inside the gate. PKRS is not saved/restored across context switches, so a
+ *   preemption with the gate open would leak key-1 access to an unrelated thread.
+ * - Entry/exit nest. The LibOS C/R handler opens the gate around the whole syscall, and the SM page
+ *   table helpers it calls open it again; exit must therefore restore the previous PKRS value rather
+ *   than unconditionally revoking.
+ */
+#define PKS_KEY_RW_MASK ((PKS_DISABLE_W | PKS_DISABLE_R) << (PKS_PROT_KEY * 2))
+
+static inline u64 __pks_gate_enter(void) {
+    u64 saved_pkrs = rdmsr(MSR_IA32_PKRS);
+    wrmsr(MSR_IA32_PKRS, saved_pkrs & ~PKS_KEY_RW_MASK); /* grant RW on key 1 */
+    return saved_pkrs;
 }
 
-static inline void __fake_naive_exit_gate(void) {
-    // simply revoke protection key RW access
-    u64 pkrs = rdmsr(MSR_IA32_PKRS);
-    pkrs = pkrs | ((PKS_DISABLE_W | PKS_DISABLE_R) << (PKS_PROT_KEY * 2)); // Enable R/W for key 1
-    wrmsr(MSR_IA32_PKRS, pkrs);
+static inline void __pks_gate_exit(u64 saved_pkrs) {
+    wrmsr(MSR_IA32_PKRS, saved_pkrs); /* restore previous (possibly still-open) state */
 }
+
+/* Arm the deny-by-default policy for the calling CPU: no read, no write on key 1. */
+static inline void __pks_arm_deny(void) {
+    wrmsr(MSR_IA32_PKRS, rdmsr(MSR_IA32_PKRS) | PKS_KEY_RW_MASK);
+}
+
+/*
+ * Grant/revoke key-1 access around a region of SM code, masking interrupts for the duration.
+ * `SM_GATE_ENTER` must be paired with `SM_GATE_EXIT` on every return path.
+ */
+#define SM_GATE_ENTER()                                                     \
+    u64 _gate_rflags;                                                       \
+    __asm__ volatile("pushfq; popq %0" : "=r"(_gate_rflags) :: "memory");   \
+    cli();                                                                  \
+    u64 _gate_saved_pkrs = __pks_gate_enter()
+
+#define SM_GATE_EXIT()                                                      \
+    do {                                                                    \
+        __pks_gate_exit(_gate_saved_pkrs);                                  \
+        if (_gate_rflags & 0x200) /* RFLAGS.IF was set on entry */          \
+            sti();                                                          \
+    } while (0)
 
 /* Linker-provided symbols for PAL serverless sections */
 extern char __pal_serverless_data_start;
@@ -191,14 +226,11 @@ static int _do_find_page_table_entry(uint64_t addr, uint64_t** out_pte_addr) {
 
 SERVERLESS_CODE
 int SM_find_page_table_entry(uint64_t addr, uint64_t** out_pte_addr) {
+    SM_GATE_ENTER();
 
-    // __fake_naive_entry_gate();
+    int ret = _do_find_page_table_entry(addr, out_pte_addr);
 
-    int ret = 0;
-
-    ret = _do_find_page_table_entry(addr, out_pte_addr);    
-
-    // __fake_naive_exit_gate();
+    SM_GATE_EXIT();
     return ret;
 }
 
@@ -212,6 +244,8 @@ int SM_update_memory_perms(int64_t addr, size_t size, bool write, bool execute, 
                   addr, addr + size, write, execute, present, usermode);
     }
 
+    SM_GATE_ENTER();
+
     for (u64 mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
         u64 *pte_addr;
         ret = _do_find_page_table_entry(mark_addr, &pte_addr);
@@ -220,11 +254,15 @@ int SM_update_memory_perms(int64_t addr, size_t size, bool write, bool execute, 
         
         /* Enforcement: flat mapping */
         assert(((*pte_addr & PTE_ADDR_MASK) == mark_addr));
-    
+
+        /* per-page copy: PTP/SM pages force S-mode below, and that must not leak into the
+         * permissions computed for the remaining (possibly usermode) pages of this range */
+        bool page_usermode = usermode;
+
         /* Enforcement: PTP and SM memory are attached with PKS key */
         if (_is_page_a_PTP(mark_addr) || _is_page_within_serverless_module(mark_addr)) {
             __set_pte_protection(pte_addr, true);
-            usermode = false; // PTP and SM memory cannot be usermode accessible
+            page_usermode = false; // PTP and SM memory cannot be usermode accessible
             assert(present);  // PTP and SM memory must be present
         }
 
@@ -235,14 +273,14 @@ int SM_update_memory_perms(int64_t addr, size_t size, bool write, bool execute, 
 
         /* Enforcement: Kernel mode W^X */
         // assert(!(write && execute));
-        if (!usermode && write && execute) {
+        if (!page_usermode && write && execute) {
             log_always("Warning: Setting KERN range 0x%lx - 0x%lx attempting to set both write and execute permissions on address 0x%lx", addr, addr + size, mark_addr);
         }
 
         uint64_t bits = 1UL; /* present bit is always set, since page is at least readable */
         if (write)
             bits |= 1UL << 1;
-        if (usermode)
+        if (page_usermode)
             bits |= 1UL << 2;
         if (!execute)
             bits |= 1UL << 63; /* NX/XD bit */
@@ -260,12 +298,16 @@ int SM_update_memory_perms(int64_t addr, size_t size, bool write, bool execute, 
         }
     }
 out:
+    SM_GATE_EXIT();
     return ret;
 }
 
 SERVERLESS_CODE
 int SM_update_memory_uncacheable(int64_t addr, size_t size, bool mark) {
     int ret = 0;
+
+    SM_GATE_ENTER();
+
     for (u64 mark_addr = addr; mark_addr < addr + size; mark_addr += PAGE_SIZE) {
         u64 *pte_addr;
         ret = _do_find_page_table_entry(mark_addr, &pte_addr);
@@ -281,6 +323,7 @@ int SM_update_memory_uncacheable(int64_t addr, size_t size, bool mark) {
             *pte_addr &= ~(1UL << 4);
     }
 out:
+    SM_GATE_EXIT();
     return ret;
 }
 
@@ -550,7 +593,93 @@ void PalServerlessCheckpointBarrierRelease(void) {
     checkpoint_barrier_release_all();
 }
 
+/*
+ * Report whether `addr`'s page holds kernel state that must NOT be rolled back by
+ * checkpoint/restore.
+ *
+ * Two categories qualify, both being live kernel/host state rather than function memory:
+ *
+ * 1. virtio driver private state. A virtqueue's bookkeeping is split in two: the
+ *    descriptor/avail/used rings live in memory shared with the VMM, while the driver-side indices
+ *    (`cached_avail_idx`, `seen_used`, `free_desc`, buffer positions) live in PAL private memory.
+ *    Restoring only the private half rewinds the driver's view while the VMM keeps its own, so the
+ *    driver re-publishes descriptors the VMM already consumed. Symptoms: console output reprinted
+ *    on every restore, and I/O completions (e.g. for sleeping threads) mis-attributed.
+ *
+ * 2. PAL kernel thread stacks. They hold the suspended execution context of the other kernel
+ *    threads parked by the C/R barrier; rewinding them makes those threads resume on stale frames
+ *    and jump to a garbage address (seen as an instruction-fetch #PF at RIP=0).
+ *
+ * Returns true if the page must be excluded from checkpoint/restore.
+ */
+SERVERLESS_CODE
+bool PalServerlessIsNonRollbackPage(uint64_t addr) {
+    uint64_t page = ALIGN_DOWN(addr, PAGE_SIZE);
+
+    if (virtio_console_is_private_state_page(page))
+        return true;
+
+    /* kernel thread stacks hold live execution context of other (parked) kernel threads */
+    if (thread_is_kernel_stack_page(page))
+        return true;
+
+    return false;
+}
+
+/*
+ * Check whether the page containing `addr` is present and writable in the page tables.
+ *
+ * The checkpoint/restore engine needs this because LibOS VMA permissions do not always match the
+ * actual PTE permissions (e.g. the single "PAL internal memory" VMA covers both read-only LibOS
+ * text/rodata and writable data). Since pks_init() enables CR0.WP, a ring-0 write to a read-only
+ * page faults, so C/R must skip such pages instead of trusting VMA `prot`.
+ *
+ * Returns true only if the PTE exists, is present and has the W bit set.
+ */
+SERVERLESS_CODE
+bool PalServerlessIsPageWritable(uint64_t addr) {
+    uint64_t* pte_addr = NULL;
+
+    SM_GATE_ENTER();
+
+    bool writable = false;
+    if (_do_find_page_table_entry(ALIGN_DOWN(addr, PAGE_SIZE), &pte_addr) == 0 && pte_addr) {
+        uint64_t pte = *pte_addr;
+        writable = (pte & 1UL) /* present */ && (pte & (1UL << 1)) /* writable */;
+    }
+
+    SM_GATE_EXIT();
+    return writable;
+}
+
+/*
+ * Open the PKS gate for the caller and return the previous PKRS value.
+ *
+ * Used by the LibOS C/R engine, which reads and writes the checkpoint arena in the key-1 protected
+ * `.libos.serverless.data` section for the whole duration of syscall 999. Callers must pass the
+ * returned token to PalServerlessGateExit(). Interrupts are left untouched here: the C/R paths
+ * already run under cli(), and the LibOS gate spans operations (memcpy of whole regions) too long to
+ * keep interrupts masked purely for the gate's sake.
+ */
+SERVERLESS_CODE
+uint64_t PalServerlessGateEnter(void) {
+    return __pks_gate_enter();
+}
+
+/* Close the PKS gate, restoring the PKRS value captured by PalServerlessGateEnter(). */
+SERVERLESS_CODE
+void PalServerlessGateExit(uint64_t token) {
+    __pks_gate_exit(token);
+}
+
+/* Arm the deny-by-default policy for the calling CPU: no read, no write on key 1.
+ * PKRS is per-CPU, so every CPU (BSP and each AP) must call this after its own pks_init(). */
+void pks_arm_current_cpu(void) {
+    __pks_arm_deny();
+}
+
 static void memory_set_protection_key(u64 base, u64 end) {
+
     for (uint64_t addr = base; addr < end; addr += PAGE_SIZE) {
         uint64_t *pte_addr = NULL;
         if (memory_find_page_table_entry(addr, &pte_addr) == 0 && pte_addr) {
@@ -592,4 +721,18 @@ void PalServerlessModuleInit(uint64_t libos_sm_data_base, uint64_t libos_sm_data
     
     /* Set up PKS protection key for the entire page table */
     memory_set_protection_key(PAGE_TABLES_ADDR, PAGE_TABLES_ADDR + PAGE_TABLES_SIZE);
+
+    /* The key bits just written are cached in TLB entries tagged with the old (key 0) value, so
+     * flush before the deny policy can take effect. Single vCPU is running at this point in boot;
+     * APs pick up the policy in pks_arm_current_cpu() during their own startup. */
+    flush_tlb();
+
+    /*
+     * Arm the deny-by-default policy: from here on, ordinary kernel code cannot read or write page
+     * tables, the SM sections or the checkpoint arena. Only code inside an SM gate can.
+     */
+    pks_arm_current_cpu();
+
+    log_always("PKS armed: key %d denied by default (PKRS=0x%lx)", PKS_PROT_KEY,
+               rdmsr(MSR_IA32_PKRS));
 }

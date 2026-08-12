@@ -67,3 +67,26 @@ void PalServerlessModuleInit(uint64_t libos_sm_data_base, uint64_t libos_sm_data
                              uint64_t libos_sm_code_base, uint64_t libos_sm_code_end) {
     /* No-op for skeleton PAL - no special initialization needed */
 }
+
+/* Dummy implementation for skeleton PAL */
+bool PalServerlessIsPageWritable(uint64_t addr) {
+    /* No page-table introspection in skeleton PAL - assume writable */
+    return true;
+}
+
+/* Dummy implementation for skeleton PAL */
+bool PalServerlessIsNonRollbackPage(uint64_t addr) {
+    /* No virtio devices or kernel thread stacks in skeleton PAL */
+    return false;
+}
+
+/* Dummy implementation for skeleton PAL */
+uint64_t PalServerlessGateEnter(void) {
+    /* No PKS in skeleton PAL */
+    return 0;
+}
+
+/* Dummy implementation for skeleton PAL */
+void PalServerlessGateExit(uint64_t token) {
+    /* No PKS in skeleton PAL */
+}

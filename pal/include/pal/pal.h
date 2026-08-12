@@ -1092,4 +1092,49 @@ void PalServerlessCheckpointBarrierRelease(void);
  */
 void PalServerlessModuleInit(uint64_t libos_sm_data_base, uint64_t libos_sm_data_end,
                              uint64_t libos_sm_code_base, uint64_t libos_sm_code_end);
+
+/*!
+ * \brief Check whether the page containing `addr` is present and writable in the page tables.
+ *
+ * Needed by checkpoint/restore: LibOS VMA permissions may claim RW for ranges that contain
+ * read-only pages (e.g. LibOS text/rodata inside the "PAL internal memory" VMA). Writing such a
+ * page from ring-0 faults because PKS init enables CR0.WP, so C/R must skip these pages.
+ *
+ * \param addr  Address inside the page to query.
+ *
+ * \return true if the page is present and writable, false otherwise.
+ */
+bool PalServerlessIsPageWritable(uint64_t addr);
+
+/*!
+ * \brief Check whether the page containing `addr` holds kernel state that must not be rolled back.
+ *
+ * Two categories qualify: virtio driver private state (indices paired with rings shared with the
+ * VMM, whose rollback makes the driver re-publish already-consumed descriptors) and PAL kernel
+ * thread stacks (suspended execution context of threads parked by the C/R barrier, whose rollback
+ * makes them resume on stale frames). Both are live kernel/host state, not function memory.
+ *
+ * \param addr  Address inside the page to query.
+ *
+ * \return true if the page must be excluded from checkpoint/restore, false otherwise.
+ */
+bool PalServerlessIsNonRollbackPage(uint64_t addr);
+
+/*!
+ * \brief Open the PKS gate for the calling CPU.
+ *
+ * Grants read/write access to key-1 protected memory (page tables, security-monitor sections and the
+ * checkpoint arena), which is denied by default. The LibOS checkpoint/restore engine wraps its
+ * accesses to the arena in this gate. Entries may nest.
+ *
+ * \return Token capturing the previous state; must be passed to PalServerlessGateExit().
+ */
+uint64_t PalServerlessGateEnter(void);
+
+/*!
+ * \brief Close the PKS gate.
+ *
+ * \param token  Value returned by the matching PalServerlessGateEnter() call.
+ */
+void PalServerlessGateExit(uint64_t token);
 #undef INSIDE_PAL_H

@@ -61,3 +61,7 @@ PalServerlessGetPalThreadCount
 PalServerlessCheckpointBarrierAcquire
 PalServerlessCheckpointBarrierRelease
 PalServerlessModuleInit
+PalServerlessIsPageWritable
+PalServerlessIsNonRollbackPage
+PalServerlessGateEnter
+PalServerlessGateExit

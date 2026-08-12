@@ -11,6 +11,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* PKS (Protection Keys Supervisor) constants shared with the fault handler */
+#define MSR_IA32_PKRS   0x000006E1
+#define PKS_PROT_KEY    1           /* key assigned to page tables, SM sections, checkpoint arena */
+#define PTE_KEY_SHIFT   59          /* PTE bits 62:59 hold the 4-bit protection key */
+#define PTE_KEY_BITS    4
+
 /*
  * Get the number of virtual CPUs available in the system.
  * 
@@ -84,12 +90,51 @@ void PalServerlessCheckpointBarrierAcquire(void);
  */
 void PalServerlessCheckpointBarrierRelease(void);
 
+/*
+ * Check whether the page containing `addr` is present and writable in the page tables.
+ *
+ * Needed by checkpoint/restore: LibOS VMA permissions may claim RW for ranges that contain
+ * read-only pages (e.g. LibOS text inside the "PAL internal memory" VMA). Writing such pages from
+ * ring-0 faults because CR0.WP is enabled, so C/R must skip them.
+ *
+ * Returns:
+ *   true if the page is present and writable, false otherwise
+ */
+bool PalServerlessIsPageWritable(uint64_t addr);
+
+/*
+ * Check whether the page containing `addr` holds kernel state that must not be rolled back.
+ *
+ * Covers virtio driver private state (indices paired with VMM-shared rings) and PAL kernel thread
+ * stacks (suspended context of threads parked by the C/R barrier). Rolling either back corrupts
+ * live kernel/host state; see the definition for details.
+ *
+ * Returns:
+ *   true if the page must be excluded from checkpoint/restore
+ */
+bool PalServerlessIsNonRollbackPage(uint64_t addr);
+
+/*
+ * Open the PKS gate, granting the calling CPU read/write access to key-1 protected memory (page
+ * tables, SM sections, checkpoint arena). Returns a token that must be passed to
+ * PalServerlessGateExit() to restore the previous state; entries may nest.
+ */
+uint64_t PalServerlessGateEnter(void);
+
+/* Close the PKS gate, restoring the PKRS state captured by PalServerlessGateEnter(). */
+void PalServerlessGateExit(uint64_t token);
+
+
+
 void PalServerlessModuleInit(uint64_t libos_sm_data_base, uint64_t libos_sm_data_end,
                              uint64_t libos_sm_code_base, uint64_t libos_sm_code_end);
 
 
 
 int pks_init(void);
+
+/* Arm the PKS deny-by-default policy on the calling CPU; PKRS is per-CPU so each AP needs this. */
+void pks_arm_current_cpu(void);
 /*
  * Memory management interface
  */
